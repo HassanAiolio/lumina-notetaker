@@ -1,6 +1,6 @@
 # Lumina Note
 
-> An AI-powered voice notetaker with a 3D interactive interface — built as a personal project to explore full-stack development, LLM API integration, and real-time browser APIs.
+> An AI-powered voice notetaker with a 3D interactive interface, built as a personal project to explore full-stack development, LLM API integration, and real-time browser APIs.
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/Python-3.12+-green)
