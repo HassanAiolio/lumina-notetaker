@@ -11,7 +11,7 @@
 
 ## Overview
 
-Lumina Note is a full-stack web application that lets users record their voice or paste raw text, then uses Google's Gemini 2.5 Flash model to intelligently structure the content into clean, context-aware notes. The app detects whether the input is a meeting, lecture, brainstorm session, or interview, and generates the most relevant sections accordingly — no rigid templates.
+Lumina Note is a full-stack web application that lets users record their voice or paste raw text, then uses Google's Gemini 2.5 Flash model to intelligently structure the content into clean, context-aware notes. The app detects whether the input is a meeting, lecture, brainstorm session, or interview, and generates the most relevant sections accordingly, no rigid templates.
 
 The project was built primarily to get hands-on experience with LLM API integration, async Python backends, and real-time browser APIs, while also exploring 3D rendering in a web context using Three.js.
 
@@ -20,12 +20,12 @@ The project was built primarily to get hands-on experience with LLM API integrat
 ## Features
 
 - **Voice recording** via the Web Speech API with real-time live transcript display
-- **AI summarization** using Gemini 2.5 Flash — detects content type and generates dynamic sections (not hardcoded templates)
-- **3D interactive scene** — a floating notebook, a pen that follows the cursor and points toward the notebook, floating particles, and a paper airplane animation on note generation
-- **MongoDB persistence** — notes are saved and retrievable across sessions
-- **Search and tag filtering** — find past notes by keyword or tag
-- **Export to Markdown** — download any note as a `.md` file
-- **Responsive UI** — dark glassmorphism design built with Tailwind CSS and Framer Motion
+- **AI summarization** using Gemini 2.5 Flash, detects content type and generates dynamic sections (not hardcoded templates)
+- **3D interactive scene**, a floating notebook, a pen that follows the cursor and points toward the notebook, floating particles, and a paper airplane animation on note generation
+- **MongoDB persistence**, notes are saved and retrievable across sessions
+- **Search and tag filtering**, find past notes by keyword or tag
+- **Export to Markdown**, download any note as a `.md` file
+- **Responsive UI**, dark glassmorphism design built with Tailwind CSS and Framer Motion
 
 ---
 
@@ -40,15 +40,15 @@ The project was built primarily to get hands-on experience with LLM API integrat
 - **Axios** for API calls
 
 ### Backend
-- **FastAPI** (Python) — async REST API
-- **Motor** — async MongoDB driver
-- **httpx** — async HTTP client for Gemini API calls
-- **Pydantic** — request/response validation
-- **Uvicorn** — ASGI server
+- **FastAPI** (Python), async REST API
+- **Motor**, async MongoDB driver
+- **httpx**, async HTTP client for Gemini API calls
+- **Pydantic**, request/response validation
+- **Uvicorn**, ASGI server
 
 ### External Services
-- **Google Gemini 2.5 Flash** — LLM for transcript structuring
-- **MongoDB Atlas** — cloud database (free tier)
+- **Google Gemini 2.5 Flash**, LLM for transcript structuring
+- **MongoDB Atlas**, cloud database (free tier)
 
 ---
 
@@ -135,7 +135,7 @@ Open [http://localhost:3000](http://localhost:3000).
 ```
 lumina-note/
 ├── backend/
-│   ├── server.py          # FastAPI app — routes, Gemini integration, MongoDB
+│   ├── server.py          # FastAPI app, routes, Gemini integration, MongoDB
 │   ├── requirements.txt
 │   └── .env               # not committed
 ├── frontend/
@@ -164,7 +164,7 @@ lumina-note/
 ## Key Implementation Details
 
 ### Dynamic AI sectioning
-Rather than hardcoding note sections, the backend prompts Gemini to detect the content type (MEETING, LECTURE, BRAINSTORM, etc.) and return the most relevant sections for that type. The frontend renders whatever sections are returned — fully dynamic, no fixed templates.
+Rather than hardcoding note sections, the backend prompts Gemini to detect the content type (MEETING, LECTURE, BRAINSTORM, etc.) and return the most relevant sections for that type. The frontend renders whatever sections are returned, fully dynamic, no fixed templates.
 
 ### 3D cursor interaction
 The pen in the 3D scene uses Three.js raycasting to project the mouse position onto a world-space plane, placing the pen tip exactly at the cursor position. `lookAt` is used to angle the pen body toward the notebook, and velocity-based tilt is applied on top for a natural feel.
@@ -178,9 +178,9 @@ The `useSpeechRecognition` hook separates interim (in-progress) results from fin
 
 3D models used in this project are sourced from [Sketchfab](https://sketchfab.com) under Creative Commons licenses:
 
-- **Notebook** — CC Attribution
-- **Pen** — CC Attribution
-- **Paper Airplane** — CC Attribution
+- **Notebook**, CC Attribution
+- **Pen**, CC Attribution
+- **Paper Airplane**, CC Attribution
 
 Please refer to each model's original Sketchfab page for full attribution and license details.
 
