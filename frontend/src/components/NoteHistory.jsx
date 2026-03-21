@@ -1,11 +1,26 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Trash2, Tag, Clock, ChevronDown, ChevronUp, X } from 'lucide-react';
+import { Search, Trash2, Tag, Clock, ChevronDown, ChevronUp } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { getNotes, deleteNote, getAllTags } from '../services/api';
 import { ExportButton } from './ExportButton';
 
-const NoteCard = ({ note, onDelete, onSelect, isExpanded, onToggle }) => {
+const BULLET_COLORS = [
+  'bg-violet-500',
+  'bg-emerald-500',
+  'bg-amber-500',
+  'bg-sky-500',
+  'bg-rose-500',
+  'bg-pink-500',
+];
+
+const formatSectionTitle = (key) =>
+  key
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+const NoteCard = ({ note, onDelete, isExpanded, onToggle }) => {
   const date = new Date(note.created_at);
   const formatted = date.toLocaleDateString('en-US', {
     month: 'short',
@@ -13,6 +28,19 @@ const NoteCard = ({ note, onDelete, onSelect, isExpanded, onToggle }) => {
     hour: '2-digit',
     minute: '2-digit',
   });
+
+  // Support both new dynamic sections and old shape
+  const sections = note.sections && Object.keys(note.sections).length > 0
+    ? note.sections
+    : {
+        ...(note.summary?.length       ? { summary: note.summary }             : {}),
+        ...(note.key_decisions?.length ? { key_decisions: note.key_decisions } : {}),
+        ...(note.action_items?.length  ? { action_items: note.action_items }   : {}),
+      };
+
+  const sectionEntries = Object.entries(sections).filter(
+    ([, items]) => Array.isArray(items) && items.length > 0
+  );
 
   return (
     <motion.div
@@ -23,16 +51,30 @@ const NoteCard = ({ note, onDelete, onSelect, isExpanded, onToggle }) => {
       className="glass-card glass-card-highlight p-4 md:p-5 hover:border-violet-500/20 transition-colors duration-300"
       data-testid={`note-card-${note.id}`}
     >
+      {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <button onClick={onToggle} className="flex-1 text-left">
-          <h3 className="font-heading text-base font-semibold text-white leading-snug">{note.title}</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="font-heading text-base font-semibold text-white leading-snug">
+              {note.title}
+            </h3>
+            {note.type && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-violet-600/20 border border-violet-500/30 text-violet-400 font-medium">
+                {note.type}
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-2 mt-1.5">
             <Clock size={11} className="text-zinc-600" />
             <span className="text-xs text-zinc-600">{formatted}</span>
           </div>
         </button>
         <div className="flex items-center gap-1.5">
-          <button onClick={onToggle} className="p-1.5 rounded-lg hover:bg-white/5 text-zinc-500 hover:text-zinc-300 transition-colors duration-200" data-testid={`toggle-note-${note.id}`}>
+          <button
+            onClick={onToggle}
+            className="p-1.5 rounded-lg hover:bg-white/5 text-zinc-500 hover:text-zinc-300 transition-colors duration-200"
+            data-testid={`toggle-note-${note.id}`}
+          >
             {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </button>
           <button
@@ -54,7 +96,7 @@ const NoteCard = ({ note, onDelete, onSelect, isExpanded, onToggle }) => {
         </div>
       )}
 
-      {/* Expanded */}
+      {/* Expanded content */}
       <AnimatePresence>
         {isExpanded && (
           <motion.div
@@ -64,45 +106,38 @@ const NoteCard = ({ note, onDelete, onSelect, isExpanded, onToggle }) => {
             className="overflow-hidden"
           >
             <div className="mt-4 pt-4 border-t border-white/5 space-y-4">
-              <div>
-                <p className="text-xs text-zinc-500 uppercase tracking-widest mb-2">Summary</p>
-                <ul className="space-y-1">
-                  {note.summary?.map((s, i) => (
-                    <li key={i} className="text-sm text-zinc-300 flex items-start gap-2">
-                      <span className="mt-1.5 w-1 h-1 rounded-full bg-violet-500 flex-shrink-0" />
-                      {s}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-              {note.key_decisions?.length > 0 && (
-                <div>
-                  <p className="text-xs text-zinc-500 uppercase tracking-widest mb-2">Key Decisions</p>
-                  <ul className="space-y-1">
-                    {note.key_decisions.map((d, i) => (
-                      <li key={i} className="text-sm text-zinc-300 flex items-start gap-2">
-                        <span className="mt-1.5 w-1 h-1 rounded-full bg-emerald-500 flex-shrink-0" />
-                        {d}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+              {sectionEntries.length > 0 ? (
+                sectionEntries.map(([key, items], idx) => (
+                  <div key={key}>
+                    <p className="text-xs text-zinc-500 uppercase tracking-widest mb-2">
+                      {formatSectionTitle(key)}
+                    </p>
+                    <ul className="space-y-1.5">
+                      {items.map((item, i) => (
+                        <motion.li
+                          key={i}
+                          initial={{ opacity: 0, x: -8 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: i * 0.04 }}
+                          className="text-sm text-zinc-300 flex items-start gap-2"
+                        >
+                          <span
+                            className={`mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                              BULLET_COLORS[idx % BULLET_COLORS.length]
+                            }`}
+                          />
+                          {item}
+                        </motion.li>
+                      ))}
+                    </ul>
+                  </div>
+                ))
+              ) : (
+                <p className="text-sm text-zinc-600">No content available.</p>
               )}
-              {note.action_items?.length > 0 && (
-                <div>
-                  <p className="text-xs text-zinc-500 uppercase tracking-widest mb-2">Action Items</p>
-                  <ul className="space-y-1">
-                    {note.action_items.map((a, i) => (
-                      <li key={i} className="text-sm text-zinc-300 flex items-start gap-2">
-                        <span className="mt-1.5 w-1 h-1 rounded-full bg-amber-500 flex-shrink-0" />
-                        {a}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+
               <div className="pt-2">
-                <ExportButton note={note} />
+                <ExportButton note={{ ...note, sections }} />
               </div>
             </div>
           </motion.div>
@@ -140,7 +175,6 @@ export const NoteHistory = ({ refreshTrigger }) => {
     fetchNotes();
   }, [fetchNotes, refreshTrigger]);
 
-  // Debounced search
   const [debouncedSearch, setDebouncedSearch] = useState('');
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedSearch(search), 300);
@@ -149,7 +183,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
 
   useEffect(() => {
     if (debouncedSearch !== undefined) fetchNotes();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch]);
 
   const handleDelete = async (id) => {
@@ -163,7 +197,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
 
   return (
     <div className="space-y-6" data-testid="note-history">
-      {/* Search + Filter */}
+      {/* Search */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
           <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600" />
@@ -177,12 +211,14 @@ export const NoteHistory = ({ refreshTrigger }) => {
         </div>
       </div>
 
-      {/* Tags Filter */}
+      {/* Tag filter */}
       {allTags.length > 0 && (
         <div className="flex flex-wrap gap-2" data-testid="tag-filter">
           <button
             onClick={() => setSelectedTag('')}
-            className={`tag-pill transition-colors duration-200 ${!selectedTag ? 'bg-violet-600/30 border-violet-500/50 text-violet-300' : ''}`}
+            className={`tag-pill transition-colors duration-200 ${
+              !selectedTag ? 'bg-violet-600/30 border-violet-500/50 text-violet-300' : ''
+            }`}
             data-testid="filter-all-tags"
           >
             All
@@ -191,7 +227,9 @@ export const NoteHistory = ({ refreshTrigger }) => {
             <button
               key={tag}
               onClick={() => setSelectedTag(selectedTag === tag ? '' : tag)}
-              className={`tag-pill transition-colors duration-200 ${selectedTag === tag ? 'bg-violet-600/30 border-violet-500/50 text-violet-300' : ''}`}
+              className={`tag-pill transition-colors duration-200 ${
+                selectedTag === tag ? 'bg-violet-600/30 border-violet-500/50 text-violet-300' : ''
+              }`}
               data-testid={`filter-tag-${tag}`}
             >
               <Tag size={10} />
@@ -201,7 +239,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
         </div>
       )}
 
-      {/* Notes List */}
+      {/* Notes list */}
       {loading ? (
         <div className="flex items-center justify-center py-12">
           <div className="w-6 h-6 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
@@ -209,7 +247,9 @@ export const NoteHistory = ({ refreshTrigger }) => {
       ) : notes.length === 0 ? (
         <div className="text-center py-16">
           <p className="text-zinc-600 text-sm">
-            {search || selectedTag ? 'No notes match your search.' : 'No saved notes yet. Start recording!'}
+            {search || selectedTag
+              ? 'No notes match your search.'
+              : 'No saved notes yet. Start recording!'}
           </p>
         </div>
       ) : (
