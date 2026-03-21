@@ -17,6 +17,13 @@ The project was built primarily to get hands-on experience with LLM API integrat
 
 ---
 
+## Live Demo Notes
+
+- **Backend cold start** — the backend is hosted on Render's free tier which spins down due to inactivity. The first request after a period of inactivity may take 20–30 seconds to respond. Subsequent requests are fast.
+- **Gemini API limits** — the app uses Google Gemini 2.5 Flash on the free tier which has a daily request limit. If summarization stops working, the daily quota may have been reached.
+
+---
+
 ## Features
 
 - **Voice recording** via the Web Speech API with real-time live transcript display
