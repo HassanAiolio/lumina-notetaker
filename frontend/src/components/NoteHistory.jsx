@@ -149,6 +149,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
 
   useEffect(() => {
     if (debouncedSearch !== undefined) fetchNotes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch]);
 
   const handleDelete = async (id) => {
