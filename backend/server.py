@@ -2,6 +2,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Query
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi.responses import JSONResponse
 import os
 import logging
 import httpx
@@ -166,6 +167,15 @@ def parse_ai_response(text: str) -> dict:
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health", response_class=JSONResponse)
+async def health():
+    return {"ok": True}
+
+@app.head("/api/health")
+async def health_head():
+    # Return empty body, same headers as GET
+    return JSONResponse(content=None)
 
 @api_router.post("/notes/summarize", response_model=SummarizeResponse)
 async def summarize_transcript(req: SummarizeRequest):
