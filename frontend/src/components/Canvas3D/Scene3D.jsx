@@ -16,11 +16,21 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
  *  - the models are meshopt-compressed, so the decoder must be registered.
  */
 
-const PARTICLE_COUNT = 90;
+const PARTICLE_COUNT_DESKTOP = 90;
+const PARTICLE_COUNT_MOBILE = 28;
 const WIDE_VIEWPORT = 1280;
+const SMALL_VIEWPORT = 768;
 
 /** Frame-rate independent easing: the fraction to move this frame. */
 const approach = (rate, delta) => 1 - Math.exp(-rate * delta);
+
+/**
+ * Where the nib points while writing, relative to itself: into the page and
+ * downwards. lookAt aims the pen's +Z here, so the barrel trails the opposite
+ * way - up and towards the viewer - which both looks like a held pen and keeps
+ * the body permanently outside the book.
+ */
+const WRITING_AIM = new THREE.Vector3(0.22, -0.8, -0.55);
 
 export const Scene3D = ({
   isRecording,
@@ -62,6 +72,13 @@ export const Scene3D = ({
     const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
     let reducedMotion = reducedMotionQuery.matches;
 
+    // A phone has no cursor to follow and a battery to protect, so it gets
+    // fewer particles, no supersampling and a resting pen.
+    const coarsePointer = window.matchMedia('(pointer: coarse)').matches;
+    const isSmallScreen = window.innerWidth < SMALL_VIEWPORT;
+    const particleCount = isSmallScreen ? PARTICLE_COUNT_MOBILE : PARTICLE_COUNT_DESKTOP;
+    const maxPixelRatio = reducedMotion || isSmallScreen ? 1 : 1.5;
+
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
     camera.position.set(0, 1.5, 5);
@@ -82,7 +99,7 @@ export const Scene3D = ({
     // opaque content column, so they are gone.
     renderer.shadowMap.enabled = false;
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, reducedMotion ? 1 : 1.5));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.7));
 
@@ -138,6 +155,8 @@ export const Scene3D = ({
     let mixer = null;
     let pageAction = null;
     let disposed = false;
+    let notebookSweep = 1.3;
+    let penLength = 0.6;
 
     const fit = (model, targetSize) => {
       const box = new THREE.Box3().setFromObject(model);
@@ -163,6 +182,11 @@ export const Scene3D = ({
       const model = gltf.scene;
       fit(model, 2.2);
       notebookGroup.add(model);
+      // The notebook turns about Y, so what the pen must clear is the radius it
+      // sweeps in the XZ plane - not its bounding sphere, which is larger in Y
+      // and would have let the barrel dip into a corner as the book came round.
+      const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3());
+      notebookSweep = 0.5 * Math.hypot(size.x, size.z);
 
       // The model ships a rigged page animation that nothing was playing.
       // We drive its playhead ourselves instead of letting it loop on its own.
@@ -179,13 +203,22 @@ export const Scene3D = ({
 
     load('/models/pen.glb', (gltf) => {
       const model = gltf.scene;
-      const scale = fit(model, 0.6);
+      fit(model, 0.6);
       model.updateMatrixWorld(true);
       const box = new THREE.Box3().setFromObject(model);
-      // Shift so the nib, not the centre, sits at the group origin.
-      model.position.z += (box.max.z - box.min.z) / 2;
+      penLength = box.max.z - box.min.z;
+
+      // The model's nib is at its local -Z end, and fit() leaves the model
+      // centred. Offsetting alone puts the nib at the origin but leaves the
+      // BODY pointing along +Z - the same direction lookAt aims at the
+      // notebook, so the pen was driven straight through the book.
+      //
+      // Turning the wrapper by half a turn keeps the nib on the origin and
+      // sends the body backwards instead, which is also how a pen is actually
+      // held: nib on the page, barrel trailing away towards the viewer.
+      model.position.z += penLength / 2;
+      innerPen.rotation.y = Math.PI;
       innerPen.add(model);
-      void scale;
     });
 
     load('/models/paper_airplane.glb', (gltf) => {
@@ -194,11 +227,11 @@ export const Scene3D = ({
     });
 
     // ── Particles: one Points object instead of 50 meshes ─────────────────
-    const particlePositions = new Float32Array(PARTICLE_COUNT * 3);
-    const particleSeeds = new Float32Array(PARTICLE_COUNT * 3); // baseX, baseY, phase
-    const particleSpeeds = new Float32Array(PARTICLE_COUNT);
+    const particlePositions = new Float32Array(particleCount * 3);
+    const particleSeeds = new Float32Array(particleCount * 3); // baseX, baseY, phase
+    const particleSpeeds = new Float32Array(particleCount);
 
-    for (let i = 0; i < PARTICLE_COUNT; i += 1) {
+    for (let i = 0; i < particleCount; i += 1) {
       const x = (Math.random() - 0.5) * 12;
       const y = (Math.random() - 0.5) * 8;
       const z = (Math.random() - 0.5) * 6;
@@ -230,11 +263,14 @@ export const Scene3D = ({
     let pointerSeen = false;
 
     const handlePointerMove = (event) => {
+      if (event.pointerType === 'touch') return;
       pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
       pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
       pointerSeen = true;
     };
-    window.addEventListener('pointermove', handlePointerMove, { passive: true });
+    if (!coarsePointer) {
+      window.addEventListener('pointermove', handlePointerMove, { passive: true });
+    }
 
     // ── Animation state ───────────────────────────────────────────────────
     const penPosition = new THREE.Vector3(0, 0, 1.5);
@@ -246,6 +282,7 @@ export const Scene3D = ({
     const MAX_TILT = 0.15;
 
     let smoothedLevel = 0;
+    const aimPoint = new THREE.Vector3();
     let glowTarget = 0;
     let airplaneProgress = 0;
     let airplaneActive = false;
@@ -310,7 +347,10 @@ export const Scene3D = ({
         penTarget.set(
           notebookWorld.x - 0.55 + across * 1.1,
           notebookWorld.y + 0.28 - line * 0.22 + (recording ? smoothedLevel * 0.05 : 0),
-          notebookWorld.z + 0.75,
+          // In front of everything the book sweeps (1.06 covers the slight
+          // swell on loud speech), so the pen overlaps the page on screen
+          // without ever intersecting it in depth.
+          notebookWorld.z + notebookSweep * 1.06 + penLength * 0.35,
         );
       } else if (pointerSeen) {
         raycaster.setFromCamera(pointer, camera);
@@ -323,7 +363,14 @@ export const Scene3D = ({
       penPosition.lerp(penTarget, approach(working ? 8 : 4, delta));
       penGroup.position.copy(penPosition);
 
-      lookTarget.lerp(notebookWorld, approach(3, delta));
+      // Idle, the pen aims at the notebook, which is the original charm of the
+      // scene. Writing, aiming at the notebook's centre would stand it almost
+      // perpendicular to the page and foreshorten it to a dot, so it aims just
+      // into the page instead and leans naturally.
+      if (recording || working) aimPoint.copy(penPosition).add(WRITING_AIM);
+      else aimPoint.copy(notebookWorld);
+
+      lookTarget.lerp(aimPoint, approach(recording || working ? 6 : 3, delta));
       penGroup.lookAt(lookTarget);
 
       // Velocity-based tilt, converted to a per-second rate.
@@ -340,7 +387,7 @@ export const Scene3D = ({
       if (!reducedMotion) {
         const positions = particleGeometry.attributes.position.array;
         const lift = 0.3 + smoothedLevel * 0.55;
-        for (let i = 0; i < PARTICLE_COUNT; i += 1) {
+        for (let i = 0; i < particleCount; i += 1) {
           const seed = i * 3;
           const speed = particleSpeeds[i];
           const phase = particleSeeds[seed + 2];
@@ -400,13 +447,30 @@ export const Scene3D = ({
     const handleVisibility = () => (document.hidden ? stopLoop() : startLoop());
     document.addEventListener('visibilitychange', handleVisibility);
 
-    const handleResize = () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
+    let lastWidth = window.innerWidth;
+    let lastHeight = window.innerHeight;
+    let resizeTimer = null;
+
+    const applyResize = () => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      // Ignore the small height-only changes the address bar produces; a real
+      // rotation or window resize still gets through.
+      if (width === lastWidth && Math.abs(height - lastHeight) < 120) return;
+      lastWidth = width;
+      lastHeight = height;
+      camera.aspect = width / height;
       camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setSize(width, height);
       layout();
     };
+
+    const handleResize = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(applyResize, 150);
+    };
     window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', handleResize);
 
     const handleMotionPreference = (event) => {
       reducedMotion = event.matches;
@@ -426,8 +490,10 @@ export const Scene3D = ({
       disposed = true;
       stopLoop();
       document.removeEventListener('visibilitychange', handleVisibility);
+      if (resizeTimer) clearTimeout(resizeTimer);
       window.removeEventListener('resize', handleResize);
-      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('orientationchange', handleResize);
+      if (!coarsePointer) window.removeEventListener('pointermove', handlePointerMove);
       reducedMotionQuery.removeEventListener?.('change', handleMotionPreference);
       canvas.removeEventListener('webglcontextlost', handleContextLost);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored);

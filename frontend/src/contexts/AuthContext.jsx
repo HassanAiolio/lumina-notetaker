@@ -51,9 +51,10 @@ export const AuthProvider = ({ children }) => {
   const [status, setStatus] = useState('loading'); // loading | ready | error
   const [error, setError] = useState('');
   const [signingIn, setSigningIn] = useState(false);
-  const mountedRef = useRef(true);
-
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  const initializedRef = useRef(false);
+  // The credential callback is handed to Google once and must not go stale, so
+  // it is read through a ref rather than captured at initialize() time.
+  const credentialHandlerRef = useRef(null);
 
   const signOut = useCallback(() => {
     tokenStore.clear();
@@ -110,17 +111,20 @@ export const AuthProvider = ({ children }) => {
     try {
       const result = await signInWithGoogle(credential);
       tokenStore.set(result.access_token);
-      if (mountedRef.current) setUser(result.user);
+      setUser(result.user);
       return true;
     } catch (err) {
-      if (mountedRef.current) setError(errorMessage(err, 'Sign-in failed. Please try again.'));
+      setError(errorMessage(err, 'Sign-in failed. Please try again.'));
       return false;
     } finally {
-      if (mountedRef.current) setSigningIn(false);
+      setSigningIn(false);
     }
   }, []);
 
-  /** Render Google's button into `element`. Returns a cleanup function. */
+  // Keep the ref pointing at the current handler without re-initializing GSI.
+  credentialHandlerRef.current = handleCredential;
+
+  /** Render Google's button into `element`. */
   const renderSignInButton = useCallback(
     async (element) => {
       if (!element) return;
@@ -132,27 +136,34 @@ export const AuthProvider = ({ children }) => {
 
       try {
         const google = await loadGoogleScript();
-        google.accounts.id.initialize({
-          client_id: clientId,
-          callback: ({ credential }) => handleCredential(credential),
-          auto_select: false,
-          cancel_on_tap_outside: true,
-          use_fedcm_for_prompt: true,
-        });
+        // initialize() must run exactly once. Calling it again detaches the
+        // callback from any button already rendered, so a click goes nowhere.
+        if (!initializedRef.current) {
+          google.accounts.id.initialize({
+            client_id: clientId,
+            callback: ({ credential }) => credentialHandlerRef.current?.(credential),
+            auto_select: false,
+            cancel_on_tap_outside: true,
+          });
+          initializedRef.current = true;
+        }
         element.innerHTML = '';
+        // Google takes a pixel width, so fit it to the card rather than let a
+        // fixed 280 overflow a narrow phone.
+        const available = element.parentElement?.clientWidth || element.clientWidth || 280;
         google.accounts.id.renderButton(element, {
           theme: 'filled_black',
           size: 'large',
           shape: 'pill',
           text: 'continue_with',
-          width: 280,
+          width: Math.max(200, Math.min(320, Math.floor(available))),
           logo_alignment: 'left',
         });
       } catch (err) {
         setError(err.message || 'Could not load Google Sign-In.');
       }
     },
-    [config, handleCredential],
+    [config],
   );
 
   const value = useMemo(
