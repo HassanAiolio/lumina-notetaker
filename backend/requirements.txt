@@ -1,8 +1,11 @@
 fastapi
-uvicorn
+uvicorn[standard]
 motor
+pymongo
+dnspython
 python-dotenv
 httpx
 pydantic
-pymongo
-dnspython
+python-multipart
+PyJWT
+google-auth
