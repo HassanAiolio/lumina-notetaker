@@ -35,6 +35,13 @@ const FOCUS_PITCH = -0.13;
 /** How far the pen leans off the page normal, so it reads as held, not stabbed. */
 const WRITING_LEAN = new THREE.Vector3(0.12, -0.55, 0);
 
+/**
+ * How far the pen is raised back along its own barrel, in pen lengths, from the
+ * point it is aimed at. 0 puts the nib exactly on that point; 0.5 lifts the
+ * whole pen clear by half its length. Lower it to bring the nib back down.
+ */
+const NIB_LIFT = 0.5;
+
 /** Shortest-path angle blend, so easing out of a drifting spin does not unwind. */
 const lerpAngle = (from, to, t) => {
   const TAU = Math.PI * 2;
@@ -240,7 +247,10 @@ export const Scene3D = ({
       // Turning the wrapper by half a turn keeps the nib on the origin and
       // sends the body backwards instead, which is also how a pen is actually
       // held: nib on the page, barrel trailing away towards the viewer.
-      model.position.z += penLength / 2;
+      //
+      // The extra NIB_LIFT then raises the whole pen back along its own barrel,
+      // away from whatever it points at.
+      model.position.z += penLength * (0.5 + NIB_LIFT);
       innerPen.rotation.y = Math.PI;
       innerPen.add(model);
     });
