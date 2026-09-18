@@ -144,6 +144,13 @@ export const AuthProvider = ({ children }) => {
             callback: ({ credential }) => credentialHandlerRef.current?.(credential),
             auto_select: false,
             cancel_on_tap_outside: true,
+            // Ask for FedCM, where the browser shows its own account chooser
+            // instead of opening a popup window. A blocked popup is the single
+            // most common way this flow fails, and FedCM removes the popup from
+            // the picture entirely. Browsers without it fall back to the popup,
+            // and older GSI builds simply ignore these flags.
+            use_fedcm_for_button: true,
+            use_fedcm_for_prompt: true,
           });
           initializedRef.current = true;
         }

@@ -90,6 +90,10 @@ export const SignIn = () => {
               We only read your name, email and profile picture from Google — just enough to keep
               your notes yours.
             </p>
+            <p className="text-[11px] text-zinc-500 text-center leading-relaxed">
+              Nothing happening when you click? Your browser may be blocking the Google
+              sign-in window — check for a blocked-popup icon in the address bar.
+            </p>
           </div>
         </div>
       </motion.div>
