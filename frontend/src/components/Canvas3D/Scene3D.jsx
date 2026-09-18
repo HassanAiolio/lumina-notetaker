@@ -25,12 +25,22 @@ const SMALL_VIEWPORT = 768;
 const approach = (rate, delta) => 1 - Math.exp(-rate * delta);
 
 /**
- * Where the nib points while writing, relative to itself: into the page and
- * downwards. lookAt aims the pen's +Z here, so the barrel trails the opposite
- * way - up and towards the viewer - which both looks like a held pen and keeps
- * the body permanently outside the book.
+ * The pose the notebook settles into while you are recording or a transcript is
+ * being made: squared up to the camera so the pen has a page to write on.
+ * Add Math.PI to FOCUS_YAW if the book ever settles spine-first.
  */
-const WRITING_AIM = new THREE.Vector3(0.22, -0.8, -0.55);
+const FOCUS_YAW = 0;
+const FOCUS_PITCH = -0.13;
+
+/** How far the pen leans off the page normal, so it reads as held, not stabbed. */
+const WRITING_LEAN = new THREE.Vector3(0.12, -0.55, 0);
+
+/** Shortest-path angle blend, so easing out of a drifting spin does not unwind. */
+const lerpAngle = (from, to, t) => {
+  const TAU = Math.PI * 2;
+  const delta = (((to - from + Math.PI) % TAU) + TAU) % TAU - Math.PI;
+  return from + delta * t;
+};
 
 export const Scene3D = ({
   isRecording,
@@ -155,8 +165,23 @@ export const Scene3D = ({
     let mixer = null;
     let pageAction = null;
     let disposed = false;
-    let notebookSweep = 1.3;
-    let penLength = 0.6;
+    // Half-extents of the book in its own space. fit() centres the model on the
+    // group origin, so the faces sit at +/- these values.
+    const bookHalf = new THREE.Vector3(1.1, 0.62, 0.66);
+
+    const AXIS_VECTORS = [
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 1, 0),
+      new THREE.Vector3(0, 0, 1),
+    ];
+
+    const measureBook = (model) => {
+      notebookGroup.updateMatrixWorld(true);
+      const toLocal = new THREE.Matrix4().copy(notebookGroup.matrixWorld).invert();
+      const box = new THREE.Box3().setFromObject(model).applyMatrix4(toLocal);
+      box.getSize(bookHalf);
+      bookHalf.multiplyScalar(0.5);
+    };
 
     const fit = (model, targetSize) => {
       const box = new THREE.Box3().setFromObject(model);
@@ -182,11 +207,7 @@ export const Scene3D = ({
       const model = gltf.scene;
       fit(model, 2.2);
       notebookGroup.add(model);
-      // The notebook turns about Y, so what the pen must clear is the radius it
-      // sweeps in the XZ plane - not its bounding sphere, which is larger in Y
-      // and would have let the barrel dip into a corner as the book came round.
-      const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3());
-      notebookSweep = 0.5 * Math.hypot(size.x, size.z);
+      measureBook(model);
 
       // The model ships a rigged page animation that nothing was playing.
       // We drive its playhead ourselves instead of letting it loop on its own.
@@ -282,7 +303,13 @@ export const Scene3D = ({
     const MAX_TILT = 0.15;
 
     let smoothedLevel = 0;
+    let focus = 0;
     const aimPoint = new THREE.Vector3();
+    const writeLocal = new THREE.Vector3();
+    const pageNormal = new THREE.Vector3(0, 0, 1);
+    const faceNormal = new THREE.Vector3();
+    const toCamera = new THREE.Vector3();
+    let pageSide = 1;
     let glowTarget = 0;
     let airplaneProgress = 0;
     let airplaneActive = false;
@@ -304,15 +331,24 @@ export const Scene3D = ({
       smoothedLevel += (rawLevel - smoothedLevel) * approach(recording ? 9 : 3, delta);
 
       // ── Notebook ────────────────────────────────────────────────────────
+      // Writing on a book that is slowly turning cannot look right, so while
+      // there is something to write the notebook squares up to the camera and
+      // all but stops. It drifts again once the work is done.
+      focus += ((recording || working ? 1 : 0) - focus) * approach(2.2, delta);
+
       notebookGroup.position.x = home.x;
       notebookGroup.position.z = home.z;
       if (reducedMotion) {
         notebookGroup.position.y = home.y;
-        notebookGroup.rotation.set(0, -0.25, 0);
+        notebookGroup.rotation.set(FOCUS_PITCH, FOCUS_YAW, 0);
       } else {
-        notebookGroup.position.y = home.y + Math.sin(elapsed * 0.5) * 0.15;
-        notebookGroup.rotation.y = Math.sin(elapsed * 0.3) * 0.1 + elapsed * 0.05;
-        notebookGroup.rotation.x = Math.sin(elapsed * 0.2) * 0.02;
+        const idleYaw = Math.sin(elapsed * 0.3) * 0.1 + elapsed * 0.05;
+        const idlePitch = Math.sin(elapsed * 0.2) * 0.02;
+        notebookGroup.position.y =
+          home.y + Math.sin(elapsed * 0.5) * 0.15 * (1 - focus * 0.8);
+        notebookGroup.rotation.y = lerpAngle(idleYaw, FOCUS_YAW, focus);
+        notebookGroup.rotation.x = THREE.MathUtils.lerp(idlePitch, FOCUS_PITCH, focus);
+        notebookGroup.rotation.z = 0;
       }
       // Louder speech leans the notebook very slightly towards the viewer.
       const swell = 1 + smoothedLevel * 0.05;
@@ -335,23 +371,60 @@ export const Scene3D = ({
       glowSphere.scale.setScalar(1 + smoothedLevel * 0.12);
 
       // ── Pen ─────────────────────────────────────────────────────────────
+      // The transform above has not been flushed yet and localToWorld reads
+      // matrixWorld, so without this the nib trails a frame behind the page.
+      notebookGroup.updateMatrixWorld(true);
       notebookGroup.getWorldPosition(notebookWorld);
 
       if (recording || working) {
-        // Trace lines across the page, so it reads as writing rather than
-        // hovering. Recording nudges the stroke with the speaker's volume.
+        // The stroke is laid out in the notebook's own space and then converted
+        // to world, so the nib sits ON the page and travels with the book
+        // instead of floating at a fixed distance in front of it.
         const speed = working ? 1.6 : 0.9;
         const sweep = (elapsed * speed) % 3;
         const line = Math.floor(sweep);
         const across = sweep - line;
-        penTarget.set(
-          notebookWorld.x - 0.55 + across * 1.1,
-          notebookWorld.y + 0.28 - line * 0.22 + (recording ? smoothedLevel * 0.05 : 0),
-          // In front of everything the book sweeps (1.06 covers the slight
-          // swell on loud speech), so the pen overlaps the page on screen
-          // without ever intersecting it in depth.
-          notebookWorld.z + notebookSweep * 1.06 + penLength * 0.35,
-        );
+        // Which face is the camera looking at? Asking every frame means this
+        // is right whatever pose the book is in and however the asset was
+        // authored - no assumption about which way "front" happens to be.
+        // The book is settled while writing, so the choice does not flicker.
+        toCamera.copy(camera.position).sub(notebookWorld);
+        let facing = 2;
+        let facingDot = 0; // starting at -Infinity would never be beaten
+        for (let axis = 0; axis < 3; axis += 1) {
+          const dot = faceNormal
+            .copy(AXIS_VECTORS[axis])
+            .transformDirection(notebookGroup.matrixWorld)
+            .dot(toCamera);
+          if (Math.abs(dot) > Math.abs(facingDot)) {
+            facing = axis;
+            facingDot = dot;
+          }
+        }
+        pageSide = facingDot >= 0 ? 1 : -1;
+
+        // The two axes left over span the face; the longer one is written along.
+        const otherA = (facing + 1) % 3;
+        const otherB = (facing + 2) % 3;
+        const acrossAxis =
+          bookHalf.getComponent(otherA) >= bookHalf.getComponent(otherB) ? otherA : otherB;
+        const downAxis = acrossAxis === otherA ? otherB : otherA;
+
+        pageNormal
+          .copy(AXIS_VECTORS[facing])
+          .transformDirection(notebookGroup.matrixWorld)
+          .multiplyScalar(pageSide);
+
+        writeLocal
+          .set(0, 0, 0)
+          .addScaledVector(AXIS_VECTORS[acrossAxis], (across - 0.5) * bookHalf.getComponent(acrossAxis) * 1.25)
+          .addScaledVector(AXIS_VECTORS[downAxis], (0.34 - line * 0.28) * bookHalf.getComponent(downAxis))
+          .addScaledVector(
+            AXIS_VECTORS[facing],
+            pageSide * (bookHalf.getComponent(facing) + penLength * 0.05 + (recording ? smoothedLevel * 0.02 : 0)),
+          );
+        penTarget.copy(writeLocal);
+        notebookGroup.localToWorld(penTarget);
       } else if (pointerSeen) {
         raycaster.setFromCamera(pointer, camera);
         if (raycaster.ray.intersectPlane(pointerPlane, pointerWorld)) penTarget.copy(pointerWorld);
@@ -364,11 +437,16 @@ export const Scene3D = ({
       penGroup.position.copy(penPosition);
 
       // Idle, the pen aims at the notebook, which is the original charm of the
-      // scene. Writing, aiming at the notebook's centre would stand it almost
-      // perpendicular to the page and foreshorten it to a dot, so it aims just
-      // into the page instead and leans naturally.
-      if (recording || working) aimPoint.copy(penPosition).add(WRITING_AIM);
-      else aimPoint.copy(notebookWorld);
+      // scene. Writing, it aims into the page along that page's own normal plus
+      // a lean, so the nib meets the paper at a natural angle however the book
+      // happens to be turned.
+      if (recording || working) {
+        // Straight into the paper along its own normal, plus a lean so the
+        // barrel is not stood on end and foreshortened away.
+        aimPoint.copy(penPosition).addScaledVector(pageNormal, -0.7).add(WRITING_LEAN);
+      } else {
+        aimPoint.copy(notebookWorld);
+      }
 
       lookTarget.lerp(aimPoint, approach(recording || working ? 6 : 3, delta));
       penGroup.lookAt(lookTarget);
