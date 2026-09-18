@@ -25,7 +25,16 @@ if (config.enableHealthCheck) {
 let webpackConfig = {
   eslint: {
     configure: {
-      extends: ["plugin:react-hooks/recommended"],
+      // "react-app" first: listing only the react-hooks plugin REPLACED Create
+      // React App's own config, which silently disabled no-undef and every
+      // other correctness rule. A build could then compile an undefined
+      // variable straight through to a runtime ReferenceError.
+      // "react-app" already bundles the react-hooks plugin, and listing it
+      // again conflicts. Previously only the plugin was listed, which REPLACED
+      // Create React App's config and silently disabled no-undef and every
+      // other correctness rule - a build would compile an undefined variable
+      // straight through to a runtime ReferenceError.
+      extends: ["react-app"],
       rules: {
         "react-hooks/rules-of-hooks": "error",
         "react-hooks/exhaustive-deps": "warn",

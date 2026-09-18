@@ -183,6 +183,9 @@ export const Scene3D = ({
       bookHalf.multiplyScalar(0.5);
     };
 
+    /** Length of the pen along its barrel, measured once the model has loaded. */
+    let penLength = 0.6;
+
     const fit = (model, targetSize) => {
       const box = new THREE.Box3().setFromObject(model);
       const size = box.getSize(new THREE.Vector3());
