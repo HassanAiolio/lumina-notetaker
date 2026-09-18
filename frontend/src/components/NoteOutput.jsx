@@ -8,10 +8,10 @@ import { languageName, noteToMarkdown, sectionEntries, sectionLabel } from '../l
 const Section = ({ sectionKey, label, items, copied, onCopy }) => (
   <div className="space-y-2">
     <div className="flex items-center justify-between gap-3">
-      <h4 className="text-xs text-zinc-500 uppercase tracking-widest font-medium">{label}</h4>
+      <h4 className="text-xs text-zinc-400 uppercase tracking-widest font-medium">{label}</h4>
       <button
         onClick={() => onCopy(items.join('\n'), sectionKey)}
-        className="text-zinc-600 hover:text-zinc-300 transition-colors duration-200"
+        className="text-zinc-400 hover:text-white transition-colors duration-200"
         aria-label={`Copy ${label}`}
         data-testid={`copy-${sectionKey}`}
       >
@@ -27,7 +27,7 @@ const Section = ({ sectionKey, label, items, copied, onCopy }) => (
           transition={{ delay: Math.min(index * 0.04, 0.4) }}
           className="text-sm text-zinc-300 leading-relaxed flex items-start gap-2"
         >
-          <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-violet-500 flex-shrink-0" />
+          <span className="mt-[7px] w-1 h-1 rounded-full bg-zinc-600 flex-shrink-0" />
           <span>{item}</span>
         </motion.li>
       ))}
@@ -78,7 +78,7 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
               {note.title}
             </h2>
             {note.type && (
-              <span className="text-xs px-2 py-0.5 rounded-full bg-violet-600/20 border border-violet-500/30 text-violet-400 font-medium">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-zinc-400 font-medium">
                 {note.type}
               </span>
             )}
@@ -88,12 +88,12 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
               </span>
             )}
           </div>
-          <p className="text-xs text-zinc-500 mt-1">AI-generated summary</p>
+          <p className="text-xs text-zinc-400 mt-1">AI-generated summary</p>
         </div>
         {onClose && (
           <button
             onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-300 transition-colors duration-200 flex-shrink-0"
+            className="text-zinc-400 hover:text-white transition-colors duration-200 flex-shrink-0"
             aria-label="Close"
             data-testid="close-note-output"
           >
@@ -135,7 +135,7 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
         <div className="border-t border-white/5 pt-4">
           <button
             onClick={() => setShowTranscript((value) => !value)}
-            className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 uppercase tracking-widest font-medium transition-colors duration-200"
+            className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white uppercase tracking-widest font-medium transition-colors duration-200"
             aria-expanded={showTranscript}
             data-testid="toggle-transcript"
           >
@@ -159,7 +159,7 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
       )}
 
       <div className="space-y-3">
-        <p className="text-xs text-zinc-500 uppercase tracking-widest font-medium">Tags</p>
+        <p className="text-xs text-zinc-400 uppercase tracking-widest font-medium">Tags</p>
         <div className="flex flex-wrap gap-2 items-center">
           {tags.map((tag) => (
             <span key={tag} className="tag-pill">
@@ -184,7 +184,7 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
                 }
               }}
               placeholder="Add tag…"
-              className="h-7 w-28 text-xs bg-transparent border-white/10 rounded-full px-3 text-zinc-300 placeholder:text-zinc-600"
+              className="h-7 w-28 text-xs bg-transparent border-white/10 rounded-full px-3 text-zinc-300 placeholder:text-zinc-400"
               data-testid="tag-input"
             />
             <button

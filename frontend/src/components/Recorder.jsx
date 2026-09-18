@@ -36,7 +36,9 @@ export const Recorder = ({
   isSummarizing,
   onSummarize,
   onRecordingChange,
+  onTranscribingChange,
   onDetectedLanguage,
+  audioLevelRef,
 }) => {
   const [mode, setMode] = useState('voice');
   const [stage, setStage] = useState('idle'); // idle | encoding | transcribing
@@ -47,6 +49,7 @@ export const Recorder = ({
   const [pendingAudio, setPendingAudio] = useState(null);
 
   const recorder = useAudioRecorder({
+    levelRef: audioLevelRef,
     onMaxDuration: () => {
       toast.warning('Maximum recording length reached — wrapping up.');
       handleStop();
@@ -61,6 +64,11 @@ export const Recorder = ({
   useEffect(() => {
     onRecordingChange?.(recorder.isRecording && !recorder.isPaused);
   }, [recorder.isRecording, recorder.isPaused, onRecordingChange]);
+
+  // The 3D scene has the pen write while a transcript is being produced.
+  useEffect(() => {
+    onTranscribingChange?.(busy);
+  }, [busy, onTranscribingChange]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -205,7 +213,7 @@ export const Recorder = ({
             className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium border transition-colors duration-200 disabled:opacity-40 disabled:cursor-not-allowed ${
               mode === id
                 ? 'bg-violet-600/20 text-violet-300 border-violet-500/30'
-                : 'text-zinc-500 hover:text-zinc-300 border-transparent'
+                : 'text-zinc-400 hover:text-white border-transparent'
             }`}
             data-testid={`${id}-mode-btn`}
           >
@@ -279,7 +287,7 @@ export const Recorder = ({
                     </span>
                     <span
                       className={`text-[11px] font-medium uppercase tracking-widest ${
-                        recorder.isPaused ? 'text-zinc-500' : 'text-red-400'
+                        recorder.isPaused ? 'text-zinc-400' : 'text-red-400'
                       }`}
                     >
                       {recorder.isPaused ? 'Paused' : 'Recording'}
@@ -334,7 +342,7 @@ export const Recorder = ({
                   )}
                   <button
                     onClick={() => abortRef.current?.abort()}
-                    className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors duration-200"
+                    className="text-xs text-zinc-400 hover:text-white transition-colors duration-200"
                   >
                     Cancel
                   </button>
@@ -343,7 +351,7 @@ export const Recorder = ({
             </AnimatePresence>
 
             {!recorder.isSupported && (
-              <p className="text-xs text-zinc-500 text-center max-w-sm">
+              <p className="text-xs text-zinc-400 text-center max-w-sm">
                 This browser cannot record audio. Switch to the Text tab and paste your notes
                 instead.
               </p>
@@ -360,14 +368,14 @@ export const Recorder = ({
                 className="glass-card glass-card-highlight p-5"
                 data-testid="live-captions"
               >
-                <p className="text-xs text-zinc-500 uppercase tracking-widest mb-3 font-medium">
+                <p className="text-xs text-zinc-400 uppercase tracking-widest mb-3 font-medium">
                   Live preview
                 </p>
                 <p className="text-zinc-300 leading-relaxed text-sm">
                   {speech.captions}
-                  {speech.interim && <span className="text-zinc-500 italic">{speech.interim}</span>}
+                  {speech.interim && <span className="text-zinc-400 italic">{speech.interim}</span>}
                 </p>
-                <p className="text-[11px] text-zinc-600 mt-3">
+                <p className="text-[11px] text-zinc-400 mt-3">
                   A rough preview from your browser. The saved transcript is produced from the audio
                   when you stop.
                 </p>
@@ -380,7 +388,7 @@ export const Recorder = ({
           value={transcript}
           onChange={(event) => onTranscriptChange(event.target.value)}
           placeholder="Paste your raw notes or meeting transcript here…"
-          className="min-h-[220px] bg-black/50 border-white/10 text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/30 resize-y rounded-xl"
+          className="min-h-[220px] bg-black/50 border-white/10 text-zinc-200 placeholder:text-zinc-400 focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/30 resize-y rounded-xl"
           data-testid="text-input"
         />
       )}
@@ -434,12 +442,12 @@ export const Recorder = ({
             data-testid="transcript-panel"
           >
             <div className="flex items-center justify-between">
-              <p className="text-xs text-zinc-500 uppercase tracking-widest font-medium">
+              <p className="text-xs text-zinc-400 uppercase tracking-widest font-medium">
                 Transcript
               </p>
               <button
                 onClick={() => onTranscriptChange('')}
-                className="text-xs text-zinc-600 hover:text-red-400 transition-colors duration-200"
+                className="text-xs text-zinc-400 hover:text-red-400 transition-colors duration-200"
                 data-testid="clear-transcript-btn"
               >
                 Clear
@@ -451,7 +459,7 @@ export const Recorder = ({
               className="min-h-[140px] bg-black/40 border-white/10 text-zinc-200 focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/30 resize-y rounded-lg text-sm"
               data-testid="transcript-editor"
             />
-            <p className="text-[11px] text-zinc-600">
+            <p className="text-[11px] text-zinc-400">
               Fix anything that came out wrong before generating your notes.
             </p>
           </motion.div>

@@ -65,7 +65,7 @@ export const UserMenu = () => {
           >
             <div className="px-3 py-2.5 border-b border-white/5">
               <p className="text-sm font-medium text-zinc-200 truncate">{user.name || 'Signed in'}</p>
-              <p className="text-xs text-zinc-500 truncate">{user.email}</p>
+              <p className="text-xs text-zinc-400 truncate">{user.email}</p>
             </div>
             <button
               onClick={() => {
@@ -88,6 +88,6 @@ export const UserMenu = () => {
 
 export const UserAvatarFallback = () => (
   <div className="w-9 h-9 rounded-full bg-white/5 border border-white/10 flex items-center justify-center">
-    <UserIcon size={14} className="text-zinc-500" />
+    <UserIcon size={14} className="text-zinc-400" />
   </div>
 );

@@ -11,10 +11,9 @@ import { languageName, sectionEntries, sectionLabel } from '../lib/notes';
 
 const PAGE_SIZE = 20;
 
-const BULLET_COLORS = [
-  'bg-violet-500', 'bg-emerald-500', 'bg-amber-500',
-  'bg-sky-500', 'bg-rose-500', 'bg-pink-500',
-];
+// One quiet bullet for every section. The old rotating rainbow implied a
+// meaning the sections do not have, and competed with the primary action.
+const BULLET_CLASS = 'bg-zinc-600';
 
 const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -44,7 +43,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
               {note.title}
             </h3>
             {note.type && (
-              <span className="text-xs px-2 py-0.5 rounded-full bg-violet-600/20 border border-violet-500/30 text-violet-400 font-medium">
+              <span className="text-xs px-2 py-0.5 rounded-full bg-white/5 border border-white/10 text-zinc-400 font-medium">
                 {note.type}
               </span>
             )}
@@ -58,7 +57,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
               </span>
             )}
           </div>
-          <div className="flex items-center gap-3 mt-1.5 text-xs text-zinc-600">
+          <div className="flex items-center gap-3 mt-1.5 text-xs text-zinc-400">
             <span className="flex items-center gap-1.5">
               <Clock size={11} />
               {formatted}
@@ -70,7 +69,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
         <div className="flex items-center gap-1.5 flex-shrink-0">
           <button
             onClick={onToggle}
-            className="p-1.5 rounded-lg hover:bg-white/5 text-zinc-500 hover:text-zinc-300 transition-colors duration-200"
+            className="p-1.5 rounded-lg hover:bg-white/5 text-zinc-400 hover:text-white transition-colors duration-200"
             aria-label={isExpanded ? 'Collapse note' : 'Expand note'}
             data-testid={`toggle-note-${note.id}`}
           >
@@ -91,7 +90,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
               </button>
               <button
                 onClick={() => setConfirmingDelete(false)}
-                className="p-1 rounded-lg text-zinc-500 hover:text-zinc-300"
+                className="p-1 rounded-lg text-zinc-400 hover:text-white"
                 aria-label="Cancel delete"
               >
                 <X size={12} />
@@ -100,7 +99,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
           ) : (
             <button
               onClick={() => setConfirmingDelete(true)}
-              className="p-1.5 rounded-lg hover:bg-red-500/10 text-zinc-600 hover:text-red-400 transition-colors duration-200"
+              className="p-1.5 rounded-lg hover:bg-red-500/10 text-zinc-400 hover:text-red-400 transition-colors duration-200"
               aria-label="Delete note"
               data-testid={`delete-note-${note.id}`}
             >
@@ -129,9 +128,9 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
           >
             <div className="mt-4 pt-4 border-t border-white/5 space-y-4">
               {entries.length > 0 ? (
-                entries.map(([key, items], index) => (
+                entries.map(([key, items]) => (
                   <div key={key}>
-                    <p className="text-xs text-zinc-500 uppercase tracking-widest mb-2">
+                    <p className="text-xs text-zinc-400 uppercase tracking-widest mb-2">
                       {sectionLabel(key, note.labels)}
                     </p>
                     <ul className="space-y-1.5">
@@ -141,9 +140,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
                           className="text-sm text-zinc-300 flex items-start gap-2 leading-relaxed"
                         >
                           <span
-                            className={`mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                              BULLET_COLORS[index % BULLET_COLORS.length]
-                            }`}
+                            className={`mt-[7px] w-1 h-1 rounded-full flex-shrink-0 ${BULLET_CLASS}`}
                           />
                           <span>{item}</span>
                         </li>
@@ -152,14 +149,14 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
                   </div>
                 ))
               ) : (
-                <p className="text-sm text-zinc-600">This note has no sections.</p>
+                <p className="text-sm text-zinc-400">This note has no sections.</p>
               )}
 
               {note.raw_transcript && (
                 <div className="pt-1">
                   <button
                     onClick={() => setShowTranscript((value) => !value)}
-                    className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 uppercase tracking-widest transition-colors duration-200"
+                    className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white uppercase tracking-widest transition-colors duration-200"
                     aria-expanded={showTranscript}
                     data-testid={`toggle-transcript-${note.id}`}
                   >
@@ -286,18 +283,18 @@ export const NoteHistory = ({ refreshTrigger }) => {
   return (
     <div className="space-y-6" data-testid="note-history">
       <div className="relative">
-        <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+        <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400" />
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           placeholder="Search titles, transcripts and tags…"
-          className="pl-9 pr-9 h-10 bg-black/50 border-white/10 text-zinc-200 placeholder:text-zinc-600 rounded-xl text-sm"
+          className="pl-9 pr-9 h-10 bg-black/50 border-white/10 text-zinc-200 placeholder:text-zinc-400 rounded-xl text-sm"
           data-testid="search-notes-input"
         />
         {search && (
           <button
             onClick={() => setSearch('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-300"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
             aria-label="Clear search"
           >
             <X size={14} />
@@ -309,9 +306,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
         <div className="flex flex-wrap gap-2" data-testid="tag-filter">
           <button
             onClick={() => setSelectedTag('')}
-            className={`tag-pill transition-colors duration-200 ${
-              !selectedTag ? 'bg-violet-600/30 border-violet-500/50 text-violet-300' : ''
-            }`}
+            className={`tag-pill ${!selectedTag ? 'tag-pill--active' : ''}`}
             data-testid="filter-all-tags"
           >
             All
@@ -320,9 +315,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
             <button
               key={tag}
               onClick={() => setSelectedTag(selectedTag === tag ? '' : tag)}
-              className={`tag-pill transition-colors duration-200 ${
-                selectedTag === tag ? 'bg-violet-600/30 border-violet-500/50 text-violet-300' : ''
-              }`}
+              className={`tag-pill ${selectedTag === tag ? 'tag-pill--active' : ''}`}
               data-testid={`filter-tag-${tag}`}
             >
               <Tag size={10} />
@@ -364,7 +357,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
         </div>
       ) : notes.length === 0 ? (
         <div className="text-center py-16" data-testid="notes-empty">
-          <p className="text-zinc-500 text-sm">
+          <p className="text-zinc-400 text-sm">
             {hasFilters ? 'No notes match your search.' : 'No saved notes yet. Record something!'}
           </p>
           {hasFilters && (
@@ -381,7 +374,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
         </div>
       ) : (
         <>
-          <p className="text-xs text-zinc-600">
+          <p className="text-xs text-zinc-400">
             {total} note{total === 1 ? '' : 's'}
             {hasFilters ? ' found' : ''}
           </p>

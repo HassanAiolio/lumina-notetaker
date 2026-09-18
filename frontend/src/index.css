@@ -168,7 +168,10 @@ body {
   mix-blend-mode: screen;
 }
 
-/* Tag styles */
+/* Tag styles.
+   Neutral by default: a tag is metadata, not an action. The violet variant is
+   reserved for the one that is actually selected, so "active" reads at a
+   glance instead of every pill shouting at once. */
 .tag-pill {
   display: inline-flex;
   align-items: center;
@@ -177,14 +180,40 @@ body {
   border-radius: 9999px;
   font-size: 12px;
   font-weight: 500;
-  border: 1px solid rgba(124, 58, 237, 0.3);
-  background: rgba(124, 58, 237, 0.1);
-  color: #a78bfa;
-  transition: background-color 0.2s, border-color 0.2s;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #a1a1aa;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
 }
 .tag-pill:hover {
-  background: rgba(124, 58, 237, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #e4e4e7;
+}
+.tag-pill--active,
+.tag-pill--active:hover {
   border-color: rgba(124, 58, 237, 0.5);
+  background: rgba(124, 58, 237, 0.2);
+  color: #c4b5fd;
+}
+
+/* A visible keyboard focus indicator everywhere, without showing a ring to
+   people navigating with a mouse. */
+:focus-visible {
+  outline: 2px solid #a78bfa;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Canvas container */

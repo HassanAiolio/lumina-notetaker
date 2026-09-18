@@ -45,7 +45,7 @@ export const LanguageSelect = ({ value, onChange, languages = [], disabled }) =>
         disabled={disabled}
         className={`flex items-center gap-2 px-3.5 py-2 rounded-full text-sm font-medium border transition-colors duration-200 ${
           disabled
-            ? 'opacity-40 cursor-not-allowed border-white/5 text-zinc-600'
+            ? 'opacity-40 cursor-not-allowed border-white/5 text-zinc-400'
             : 'border-white/10 text-zinc-300 hover:text-white hover:border-white/20'
         }`}
         aria-haspopup="listbox"
@@ -88,7 +88,7 @@ export const LanguageSelect = ({ value, onChange, languages = [], disabled }) =>
                     <span className="flex flex-col items-start text-left">
                       <span>{option.native}</span>
                       {option.name !== option.native && (
-                        <span className="text-[11px] text-zinc-500">{option.name}</span>
+                        <span className="text-[11px] text-zinc-400">{option.name}</span>
                       )}
                     </span>
                     {isSelected && <Check size={14} className="flex-shrink-0" />}

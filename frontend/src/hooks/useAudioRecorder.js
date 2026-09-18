@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { MAX_RECORDING_SECONDS, pickRecorderMimeType } from '../lib/audio';
 
 const LEVEL_BARS = 28;
+const METER_FPS = 30;
 
 /**
  * Microphone capture via MediaRecorder, with a live level meter.
@@ -10,7 +11,7 @@ const LEVEL_BARS = 28;
  * microphone, and it keeps the actual audio so the server can transcribe it in
  * whatever language was spoken.
  */
-export const useAudioRecorder = ({ onMaxDuration } = {}) => {
+export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -25,6 +26,7 @@ export const useAudioRecorder = ({ onMaxDuration } = {}) => {
   const timerRef = useRef(null);
   const elapsedRef = useRef(0);
   const chunksRef = useRef([]);
+  const lastMeterPaintRef = useRef(0);
   const onMaxDurationRef = useRef(onMaxDuration);
 
   useEffect(() => {
@@ -37,6 +39,7 @@ export const useAudioRecorder = ({ onMaxDuration } = {}) => {
     typeof MediaRecorder !== 'undefined';
 
   const teardown = useCallback(() => {
+    if (levelRef) levelRef.current = 0;
     if (frameRef.current) cancelAnimationFrame(frameRef.current);
     frameRef.current = null;
     if (timerRef.current) clearInterval(timerRef.current);
@@ -50,7 +53,7 @@ export const useAudioRecorder = ({ onMaxDuration } = {}) => {
     }
     audioContextRef.current = null;
     analyserRef.current = null;
-  }, []);
+  }, [levelRef]);
 
   // Stop the microphone if the component unmounts mid-recording.
   useEffect(() => teardown, [teardown]);
@@ -60,7 +63,7 @@ export const useAudioRecorder = ({ onMaxDuration } = {}) => {
     if (!analyser) return;
 
     const data = new Uint8Array(analyser.frequencyBinCount);
-    const tick = () => {
+    const tick = (now) => {
       if (!analyserRef.current) return;
       analyser.getByteTimeDomainData(data);
 
@@ -73,11 +76,19 @@ export const useAudioRecorder = ({ onMaxDuration } = {}) => {
       const rms = Math.sqrt(sumSquares / data.length);
       const level = Math.min(1, Math.pow(rms * 3.2, 0.7));
 
-      setLevels((previous) => [...previous.slice(1), level]);
+      // The 3D scene reads this every frame. Writing it to a ref instead of
+      // state keeps the amplitude smooth without re-rendering React at 60 Hz.
+      if (levelRef) levelRef.current = level;
+
+      // The bar meter only needs to look alive, so repaint it far less often.
+      if (now - lastMeterPaintRef.current > 1000 / METER_FPS) {
+        lastMeterPaintRef.current = now;
+        setLevels((previous) => [...previous.slice(1), level]);
+      }
       frameRef.current = requestAnimationFrame(tick);
     };
     frameRef.current = requestAnimationFrame(tick);
-  }, []);
+  }, [levelRef]);
 
   const start = useCallback(async () => {
     if (!isSupported) {

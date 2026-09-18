@@ -84,3 +84,7 @@ android-sdk/
 # ...but the documented templates must be committed.
 !.env.example
 !*.env.example
+
+# Source 3D models kept for re-optimising; the compressed ones in
+# frontend/public/models are what ships. See README for the command.
+frontend/models-src/

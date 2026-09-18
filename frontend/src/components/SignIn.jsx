@@ -57,7 +57,7 @@ export const SignIn = () => {
                 </div>
                 <div>
                   <p className="text-sm font-medium text-zinc-200">{title}</p>
-                  <p className="text-xs text-zinc-500 leading-relaxed">{body}</p>
+                  <p className="text-xs text-zinc-400 leading-relaxed">{body}</p>
                 </div>
               </div>
             ))}
@@ -86,7 +86,7 @@ export const SignIn = () => {
               </div>
             )}
 
-            <p className="text-[11px] text-zinc-600 text-center leading-relaxed">
+            <p className="text-[11px] text-zinc-400 text-center leading-relaxed">
               We only read your name, email and profile picture from Google — just enough to keep
               your notes yours.
             </p>

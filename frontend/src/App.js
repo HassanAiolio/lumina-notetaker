@@ -51,6 +51,7 @@ function Workspace() {
   const [savedCurrent, setSavedCurrent] = useState(false);
   const [currentNote, setCurrentNote] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [airplaneFlying, setAirplaneFlying] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [activeTab, setActiveTab] = useState('record');
@@ -58,6 +59,9 @@ function Workspace() {
 
   const airplaneTimerRef = useRef(null);
   const noteRef = useRef(null);
+  // Live microphone amplitude, written by the recorder every frame and read by
+  // the 3D scene. A ref rather than state so neither re-renders the other.
+  const audioLevelRef = useRef(0);
 
   const languages = useMemo(() => config?.languages || [], [config]);
 
@@ -172,9 +176,12 @@ function Workspace() {
         <Suspense fallback={null}>
           <Scene3D
             isRecording={isRecording}
+            isTranscribing={isTranscribing}
             isSummarizing={isSummarizing}
             showResult={!!currentNote}
             airplaneFlying={airplaneFlying}
+            audioLevelRef={audioLevelRef}
+            active={activeTab === 'record'}
           />
         </Suspense>
       </ErrorBoundary>
@@ -203,7 +210,7 @@ function Workspace() {
                     className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors duration-200 ${
                       activeTab === id
                         ? 'bg-violet-600/30 text-violet-300'
-                        : 'text-zinc-500 hover:text-zinc-300'
+                        : 'text-zinc-400 hover:text-white'
                     }`}
                     data-testid={`tab-${id}`}
                   >
@@ -279,7 +286,9 @@ function Workspace() {
                       isSummarizing={isSummarizing}
                       onSummarize={handleSummarize}
                       onRecordingChange={setIsRecording}
+                      onTranscribingChange={setIsTranscribing}
                       onDetectedLanguage={setDetectedLanguage}
+                      audioLevelRef={audioLevelRef}
                     />
                   </motion.div>
 
@@ -313,7 +322,7 @@ function Workspace() {
                     >
                       Your notes
                     </h2>
-                    <p className="text-sm text-zinc-500 mt-1">
+                    <p className="text-sm text-zinc-400 mt-1">
                       Private to your account. Search, filter and export anything you have saved.
                     </p>
                   </div>
@@ -334,7 +343,7 @@ function BootScreen({ message, children }) {
       <div className="noise-overlay" />
       <div className="text-center space-y-4">
         <Loader2 size={24} className="animate-spin text-violet-400 mx-auto" />
-        <p className="text-sm text-zinc-500">{message}</p>
+        <p className="text-sm text-zinc-400">{message}</p>
         {children}
       </div>
     </div>

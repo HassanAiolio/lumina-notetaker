@@ -242,6 +242,38 @@ Browsers record WebM/Opus (Chrome) or MP4/AAC (Safari). Rather than depend on co
 the client decodes locally and re-encodes to 16 kHz mono PCM, then splits long recordings at the
 quietest point near each boundary so a cut does not land mid-word.
 
+### The 3D scene reacts to your voice
+
+The notebook model ships a rigged, 21-channel page animation that nothing was
+playing. Rather than loop it decoratively, its playhead is driven by the live
+microphone amplitude that `useAudioRecorder` already computes for the level
+meter — so the pages ruffle in time with how loudly you are speaking, and the
+pen writes across the page while a transcript is being produced. The amplitude
+travels through a ref, not state, so a 60 Hz signal never re-renders React.
+
+The scene holds a still composition under `prefers-reduced-motion`, stops
+rendering when the tab is hidden or you are on the Notes tab, and every
+interpolation is expressed per second rather than per frame, so it runs at the
+same speed on a 120 Hz display as on a 60 Hz one.
+
+### Optimising the 3D models
+
+The Sketchfab originals total 7.7 MB — mostly five uncompressed 1024² PNGs on a
+notebook that renders a few hundred pixels wide. They are compressed to 0.53 MB
+(93% smaller, 27 MB of VRAM down to 5.8 MB) with no visible difference:
+
+```bash
+npx @gltf-transform/cli optimize models-src/notebook.orig.glb   public/models/notebook.glb   --texture-compress webp --texture-size 512 --compress meshopt --simplify false
+```
+
+`--simplify false` matters: the notebook is a skinned mesh and simplification
+distorts the rig. The output needs `EXT_meshopt_compression` and
+`EXT_texture_webp`, so `GLTFLoader` is given a `MeshoptDecoder`; both extensions
+are supported by the pinned three.js version.
+
+Originals live in `frontend/models-src/` (git-ignored — they are in history at
+commit `d5f5098` if you need them back).
+
 ### Stable keys, localized labels
 
 The model returns English `snake_case` section keys plus a `labels` map holding the same headings
