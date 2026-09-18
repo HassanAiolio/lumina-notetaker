@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
-  ChevronDown, Clock, FileText, Loader2, Search, Tag, Trash2, TriangleAlert, X,
+  ChevronDown, Clock, FileText, Loader2, RotateCcw, Search, Tag, Trash2, TriangleAlert, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from './ui/input';
@@ -197,6 +197,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
   const [loadingMore, setLoadingMore] = useState(false);
   const [deletingId, setDeletingId] = useState('');
   const [error, setError] = useState('');
+  const [reloadKey, setReloadKey] = useState(0);
 
   const requestIdRef = useRef(0);
 
@@ -236,7 +237,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
         if (requestIdRef.current === requestId) setLoading(false);
       }
     })();
-  }, [debouncedSearch, selectedTag, refreshTrigger]);
+  }, [debouncedSearch, selectedTag, refreshTrigger, reloadKey]);
 
   const loadMore = useCallback(async () => {
     setLoadingMore(true);
@@ -333,11 +334,22 @@ export const NoteHistory = ({ refreshTrigger }) => {
 
       {error && (
         <div
-          className="flex items-start gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3"
+          className="flex flex-col gap-3 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3"
           role="alert"
+          data-testid="notes-error"
         >
-          <TriangleAlert size={15} className="flex-shrink-0 mt-0.5" />
-          <span>{error}</span>
+          <div className="flex items-start gap-2">
+            <TriangleAlert size={15} className="flex-shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{error}</span>
+          </div>
+          <button
+            onClick={() => setReloadKey((value) => value + 1)}
+            className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-200 border border-white/10 transition-colors duration-200"
+            data-testid="retry-notes-btn"
+          >
+            <RotateCcw size={12} />
+            Try again
+          </button>
         </div>
       )}
 

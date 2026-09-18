@@ -1,0 +1,52 @@
+# Keeps the free-tier MongoDB Atlas cluster from pausing.
+#
+# Atlas suspends an M0 cluster after ~60 days with no connections, and waking it
+# again is manual. Hitting /api/health opens a connection, which resets that
+# clock. The backend answers 200 whether or not the database is reachable, so
+# this workflow reports the database field rather than relying on the status code.
+#
+# Setup: add a repository variable named BACKEND_URL (Settings -> Secrets and
+# variables -> Actions -> Variables) holding your API's base URL, with no
+# trailing slash, e.g. https://lumina-api.onrender.com
+name: Keep alive
+
+on:
+  schedule:
+    # Twice a day. Far more often than Atlas needs, but it tolerates a few
+    # missed runs. Change to '*/14 * * * *' to also keep a Render free
+    # instance warm - that uses most of the monthly free instance hours.
+    - cron: '0 6,18 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the API health endpoint
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then
+            echo "::error::Repository variable BACKEND_URL is not set."
+            exit 1
+          fi
+
+          # A cold free-tier backend can take 30s or more to answer the first
+          # request, so allow a generous timeout and a couple of attempts.
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt..."
+            if body=$(curl -fsS --max-time 90 "$BACKEND_URL/api/health"); then
+              echo "$body"
+              database=$(printf '%s' "$body" | sed -n 's/.*"database":"\([^"]*\)".*/\1/p')
+              if [ "$database" = "up" ]; then
+                echo "::notice::Database reachable - the idle timer is reset."
+                exit 0
+              fi
+              echo "::warning::API is up but the database reported '$database'."
+              exit 1
+            fi
+            sleep 20
+          done
+
+          echo "::error::Could not reach $BACKEND_URL/api/health."
+          exit 1

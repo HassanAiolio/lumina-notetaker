@@ -327,5 +327,20 @@ def test_patch_with_nothing_to_change_is_rejected(client):
     assert client.patch(f"/api/notes/{note['id']}", json={}).status_code == 400
 
 
+def test_paused_database_reports_503_not_500(client, fake_db, monkeypatch):
+    """A free-tier cluster asleep after idling should say so, not "went wrong"."""
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    def explode(*args, **kwargs):
+        raise ServerSelectionTimeoutError("cluster is paused")
+
+    monkeypatch.setattr(fake_db.notes, "count_documents", explode)
+
+    response = client.get("/api/notes")
+    assert response.status_code == 503
+    assert "waking up" in response.json()["detail"]
+    assert response.headers.get("Retry-After") == "30"
+
+
 def test_limit_is_capped(client):
     assert client.get("/api/notes", params={"limit": 5000}).status_code == 422

@@ -95,12 +95,29 @@ Google Identity Services.
 
 ### 1. Create the Google OAuth client
 
-1. Open [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials).
-2. **Create credentials → OAuth client ID → Web application**.
-3. Under **Authorised JavaScript origins**, add every origin the frontend is served from:
-   `http://localhost:3000` for development, plus your production domain.
-   No redirect URI is needed — Sign-In With Google returns the credential in the browser.
-4. Copy the client ID into `GOOGLE_CLIENT_ID` on the backend.
+This is required — Google Sign-In cannot work without it, and the app has no other
+way in. It is free and takes a few minutes.
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create a project
+   (or pick an existing one).
+2. **APIs & Services → OAuth consent screen**. Choose **External**, fill in the app name,
+   your email as support and developer contact, and save. You do not need to submit it for
+   verification: while it is in *Testing*, add your own Google account under **Test users**,
+   or click **Publish app** to let anyone sign in. Nothing here needs a paid account.
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID →
+   Web application**.
+4. Under **Authorised JavaScript origins**, add every origin the frontend is served from —
+   scheme and port included, no trailing slash:
+   - `http://localhost:3000` for local development
+   - `https://your-app.vercel.app` (or your own domain) for production
+5. Leave **Authorised redirect URIs** empty. Sign In With Google hands the credential back
+   in the browser, so there is nothing to redirect to.
+6. Copy the client ID — it looks like `1234567890-abc123.apps.googleusercontent.com` — into
+   `GOOGLE_CLIENT_ID` in `backend/.env`. It is not a secret; the frontend reads it from
+   `/api/config`, so it only needs setting in one place.
+
+If the sign-in button does not appear, the origin almost always does not match exactly.
+Origin changes can take a few minutes to propagate.
 
 ### 2. Backend
 
@@ -159,6 +176,18 @@ python -m pytest
   are usable — useful for a dashboard, but not as a liveness probe.
 - **Free-tier cold starts:** the first request after an idle period can take 20–30 seconds.
   The frontend retries idempotent reads and shows a wake-up screen rather than an error.
+- **Stop the Atlas cluster pausing:** a free M0 cluster is suspended after roughly 60 days
+  with no connections, and only a human can resume it. `.github/workflows/keepalive.yml`
+  pings `/api/health` twice a day, which opens a connection and resets that timer. Set a
+  repository variable `BACKEND_URL` (*Settings → Secrets and variables → Actions →
+  Variables*) to your API base URL, then run it once from the Actions tab to confirm.
+  Two caveats: GitHub disables scheduled workflows on a repository with no activity for
+  60 days, so push something occasionally or re-enable it from the Actions tab; and if the
+  cluster is already paused, this cannot wake it — resume it once in Atlas first.
+  Changing the cron to `*/14 * * * *` would also keep a Render free instance warm, at the
+  cost of nearly all the monthly free instance hours.
+- **A paused or unreachable database** returns 503 with a "may be waking up" message and a
+  Try again button, rather than a generic failure.
 - **Gemini quotas:** when the daily quota runs out, summarization falls back to a local
   extraction and the note is flagged in the UI. The transcript is never lost.
 - **Adopting old notes:** notes saved before accounts existed have no owner and are invisible.

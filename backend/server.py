@@ -17,6 +17,7 @@ from datetime import datetime, timezone  # noqa: E402
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
+from pymongo.errors import PyMongoError  # noqa: E402
 from starlette.middleware.cors import CORSMiddleware  # noqa: E402
 
 import db  # noqa: E402
@@ -343,6 +344,20 @@ app.include_router(api)
 async def catch_unhandled_errors(request: Request, call_next):
     try:
         return await call_next(request)
+    except PyMongoError:
+        # A free-tier cluster that has been idle is paused and takes a minute or
+        # so to come back. That is worth saying plainly instead of "went wrong".
+        logger.exception("Database error on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "The database is not responding. If it has been idle for a while it "
+                    "may be waking up - try again in a minute."
+                )
+            },
+            headers={"Retry-After": "30"},
+        )
     except Exception:  # noqa: BLE001 - never leak a stack trace to the client
         logger.exception("Unhandled error on %s %s", request.method, request.url.path)
         return JSONResponse(
