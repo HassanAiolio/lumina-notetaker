@@ -237,7 +237,7 @@ function Workspace() {
           </div>
         )}
 
-        <main className="px-6 md:px-12 pb-20">
+        <main className="px-6 md:px-12 pb-20 safe-bottom">
           <div className="max-w-3xl mx-auto">
             <AnimatePresence mode="wait">
               {activeTab === 'record' ? (

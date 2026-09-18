@@ -14,6 +14,37 @@ export const TARGET_SAMPLE_RATE = 16000;
 export const CHUNK_SECONDS = 240;
 export const MAX_RECORDING_SECONDS = 3600;
 
+/**
+ * Transcription decodes the whole recording into one Float32Array before
+ * slicing it. An hour at 16 kHz is ~230 MB of samples plus the encoded WAVs on
+ * top, which a phone will not survive, so the ceiling is lower where the memory
+ * is. Desktop keeps the full hour.
+ */
+export const maxRecordingSeconds = () => {
+  const memory = navigator.deviceMemory; // GB, Chromium only
+  if (memory && memory <= 4) return 20 * 60;
+  const coarsePointer =
+    typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+  return coarsePointer ? 30 * 60 : MAX_RECORDING_SECONDS;
+};
+
+/**
+ * Chunk length for one upload. A 4 minute WAV is ~7.7 MB, which is a slow and
+ * expensive thing to lose on a weak mobile connection, so shorten it there:
+ * each request is smaller and a retry costs less.
+ */
+export const chunkSecondsForConnection = () => {
+  const connection = navigator.connection;
+  if (!connection) return CHUNK_SECONDS;
+  if (connection.saveData) return 90;
+  if (/(^|-)2g$/.test(connection.effectiveType || '')) return 60;
+  if (connection.effectiveType === '3g') return 120;
+  return CHUNK_SECONDS;
+};
+
+/** Hand the main thread back so a long encode does not freeze the UI. */
+const yieldToUI = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 const BYTES_PER_SAMPLE = 2;
 
 /** Container the current browser will actually record in. */
@@ -174,7 +205,7 @@ export function findQuietCut(samples, idealEnd, searchSeconds = 12) {
  * Split a recording into WAV chunks of at most `chunkSeconds`.
  * Returns [{ blob, seconds }] in playback order.
  */
-export async function toWavChunks(blob, chunkSeconds = CHUNK_SECONDS) {
+export async function toWavChunks(blob, chunkSeconds = chunkSecondsForConnection()) {
   const samples = await decodeToMono16k(blob);
   const chunkSamples = Math.floor(chunkSeconds * TARGET_SAMPLE_RATE);
   const chunks = [];
@@ -190,6 +221,9 @@ export async function toWavChunks(blob, chunkSeconds = CHUNK_SECONDS) {
       seconds: slice.length / TARGET_SAMPLE_RATE,
     });
     start = end;
+    // encodeWav walks every sample synchronously; on a phone a long recording
+    // would otherwise lock the interface for seconds at a time.
+    if (start < samples.length) await yieldToUI();
   }
 
   return chunks.length ? chunks : [{ blob: encodeWav(samples), seconds: 0 }];

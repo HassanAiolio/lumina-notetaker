@@ -69,7 +69,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
         <div className="flex items-center gap-1.5 flex-shrink-0">
           <button
             onClick={onToggle}
-            className="p-1.5 rounded-lg hover:bg-white/5 text-zinc-400 hover:text-white transition-colors duration-200"
+            className="tap p-1.5 rounded-lg hover:bg-white/5 text-zinc-400 hover:text-white transition-colors duration-200"
             aria-label={isExpanded ? 'Collapse note' : 'Expand note'}
             data-testid={`toggle-note-${note.id}`}
           >
@@ -90,7 +90,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
               </button>
               <button
                 onClick={() => setConfirmingDelete(false)}
-                className="p-1 rounded-lg text-zinc-400 hover:text-white"
+                className="tap p-1 rounded-lg text-zinc-400 hover:text-white"
                 aria-label="Cancel delete"
               >
                 <X size={12} />
@@ -99,7 +99,7 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
           ) : (
             <button
               onClick={() => setConfirmingDelete(true)}
-              className="p-1.5 rounded-lg hover:bg-red-500/10 text-zinc-400 hover:text-red-400 transition-colors duration-200"
+              className="tap p-1.5 rounded-lg hover:bg-red-500/10 text-zinc-400 hover:text-red-400 transition-colors duration-200"
               aria-label="Delete note"
               data-testid={`delete-note-${note.id}`}
             >
@@ -294,7 +294,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
         {search && (
           <button
             onClick={() => setSearch('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
+            className="tap absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
             aria-label="Clear search"
           >
             <X size={14} />

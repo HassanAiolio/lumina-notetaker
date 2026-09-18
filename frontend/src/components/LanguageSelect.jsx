@@ -64,7 +64,7 @@ export const LanguageSelect = ({ value, onChange, languages = [], disabled }) =>
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: 0.15 }}
-            className="absolute left-0 mt-2 w-60 max-h-72 overflow-y-auto glass-card p-1.5 z-50"
+            className="absolute right-0 mt-2 w-[min(15rem,calc(100vw-3rem))] max-h-[min(18rem,50vh)] overflow-y-auto glass-card p-1.5 z-50"
             role="listbox"
             data-testid="language-options"
           >

@@ -11,7 +11,7 @@ const Section = ({ sectionKey, label, items, copied, onCopy }) => (
       <h4 className="text-xs text-zinc-400 uppercase tracking-widest font-medium">{label}</h4>
       <button
         onClick={() => onCopy(items.join('\n'), sectionKey)}
-        className="text-zinc-400 hover:text-white transition-colors duration-200"
+        className="tap text-zinc-400 hover:text-white transition-colors duration-200"
         aria-label={`Copy ${label}`}
         data-testid={`copy-${sectionKey}`}
       >
@@ -93,7 +93,7 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
         {onClose && (
           <button
             onClick={onClose}
-            className="text-zinc-400 hover:text-white transition-colors duration-200 flex-shrink-0"
+            className="tap text-zinc-400 hover:text-white transition-colors duration-200 flex-shrink-0"
             aria-label="Close"
             data-testid="close-note-output"
           >
@@ -166,7 +166,7 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
               {tag}
               <button
                 onClick={() => setTags(tags.filter((value) => value !== tag))}
-                className="hover:text-white transition-colors duration-200"
+                className="tap hover:text-white transition-colors duration-200"
                 aria-label={`Remove tag ${tag}`}
               >
                 <X size={10} />
@@ -189,7 +189,7 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
             />
             <button
               onClick={addTag}
-              className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-400 hover:text-white transition-colors duration-200"
+              className="tap w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-400 hover:text-white transition-colors duration-200"
               aria-label="Add tag"
               data-testid="add-tag-btn"
             >

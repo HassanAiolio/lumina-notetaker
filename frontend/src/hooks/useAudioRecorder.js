@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { MAX_RECORDING_SECONDS, pickRecorderMimeType } from '../lib/audio';
+import { maxRecordingSeconds, pickRecorderMimeType } from '../lib/audio';
 
 const LEVEL_BARS = 28;
 const METER_FPS = 30;
+const MAX_SECONDS = maxRecordingSeconds();
 
 /**
  * Microphone capture via MediaRecorder, with a live level meter.
@@ -27,6 +28,7 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
   const elapsedRef = useRef(0);
   const chunksRef = useRef([]);
   const lastMeterPaintRef = useRef(0);
+  const wakeLockRef = useRef(null);
   const onMaxDurationRef = useRef(onMaxDuration);
 
   useEffect(() => {
@@ -40,6 +42,11 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
 
   const teardown = useCallback(() => {
     if (levelRef) levelRef.current = 0;
+
+    // Let the screen sleep again.
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
+
     if (frameRef.current) cancelAnimationFrame(frameRef.current);
     frameRef.current = null;
     if (timerRef.current) clearInterval(timerRef.current);
@@ -57,6 +64,22 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
 
   // Stop the microphone if the component unmounts mid-recording.
   useEffect(() => teardown, [teardown]);
+
+  // The browser silently drops a wake lock when the page is hidden, so it has
+  // to be taken again each time the user comes back mid-recording.
+  useEffect(() => {
+    if (!isRecording) return undefined;
+    const reacquire = async () => {
+      if (document.visibilityState !== 'visible' || wakeLockRef.current) return;
+      try {
+        wakeLockRef.current = (await navigator.wakeLock?.request('screen')) || null;
+      } catch (err) {
+        /* nothing we can do about it */
+      }
+    };
+    document.addEventListener('visibilitychange', reacquire);
+    return () => document.removeEventListener('visibilitychange', reacquire);
+  }, [isRecording]);
 
   const runLevelMeter = useCallback(() => {
     const analyser = analyserRef.current;
@@ -144,6 +167,10 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
     try {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       const context = new AudioContextClass();
+      // iOS starts every AudioContext suspended. Without this the level meter
+      // reads zero for the whole recording, and so does the 3D scene.
+      if (context.state === 'suspended') await context.resume();
+
       const analyser = context.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.7;
@@ -155,10 +182,18 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
       // The level meter is decoration; recording continues without it.
     }
 
+    // A phone that locks its screen suspends the page and cuts the recording
+    // short. Not supported everywhere, and not worth failing over if refused.
+    try {
+      wakeLockRef.current = (await navigator.wakeLock?.request('screen')) || null;
+    } catch (err) {
+      /* denied, unsupported, or the tab lost focus first */
+    }
+
     timerRef.current = setInterval(() => {
       elapsedRef.current += 1;
       setSeconds(elapsedRef.current);
-      if (elapsedRef.current >= MAX_RECORDING_SECONDS) onMaxDurationRef.current?.();
+      if (elapsedRef.current >= MAX_SECONDS) onMaxDurationRef.current?.();
     }, 1000);
 
     setIsRecording(true);
@@ -216,7 +251,7 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
     timerRef.current = setInterval(() => {
       elapsedRef.current += 1;
       setSeconds(elapsedRef.current);
-      if (elapsedRef.current >= MAX_RECORDING_SECONDS) onMaxDurationRef.current?.();
+      if (elapsedRef.current >= MAX_SECONDS) onMaxDurationRef.current?.();
     }, 1000);
     setIsPaused(false);
   }, []);
@@ -241,5 +276,6 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
     pause,
     resume,
     cancel,
+    maxSeconds: MAX_SECONDS,
   };
 };

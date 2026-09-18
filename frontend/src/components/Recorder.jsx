@@ -9,7 +9,7 @@ import { Textarea } from './ui/textarea';
 import { LanguageSelect } from './LanguageSelect';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
-import { MAX_RECORDING_SECONDS, formatDuration, toWavChunks } from '../lib/audio';
+import { formatDuration, toWavChunks } from '../lib/audio';
 import { errorMessage, transcribeChunk } from '../services/api';
 import { languageName } from '../lib/notes';
 
@@ -196,7 +196,7 @@ export const Recorder = ({
   }, [pendingAudio]);
 
   const liveText = `${speech.captions}${speech.interim}`.trim();
-  const nearLimit = recorder.seconds > MAX_RECORDING_SECONDS - 120;
+  const nearLimit = recorder.seconds > recorder.maxSeconds - 120;
 
   return (
     <div className="w-full space-y-6">

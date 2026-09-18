@@ -232,3 +232,64 @@ body {
     display: contents !important;
   }
 }
+
+
+/* ── Mobile ─────────────────────────────────────────────────────────────── */
+
+/* 100vh on a phone includes the address bar, so a "full height" screen jumps
+   as the bar hides and shows. dvh tracks the real visible area. */
+@supports (min-height: 100dvh) {
+  .min-h-screen {
+    min-height: 100dvh;
+  }
+}
+
+/* iOS zooms the whole page in when a focused field is under 16px. The shadcn
+   base is text-base md:text-sm, which is right, but local text-sm overrides
+   reintroduce it - so pin 16px on small screens and let desktop keep 14px. */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    /* !important because a Tailwind `text-sm` class on the element outranks a
+       bare element selector, and these fields carry one. Scoped to phones, so
+       desktop keeps its 14px. */
+    font-size: 16px !important;
+  }
+}
+
+/* Keep content clear of the notch and the home indicator. */
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+.safe-bottom {
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom));
+}
+
+/* Enlarge the hit area of small icon buttons on touch without changing the
+   layout: an invisible inset overlay, so a 26px control answers to a 42px tap. */
+@media (pointer: coarse) {
+  .tap {
+    position: relative;
+  }
+  .tap::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
+  }
+}
+
+/* Hover styles stick on touch after a tap; only apply them where hover is real. */
+@media (hover: none) {
+  .tag-pill:hover {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #a1a1aa;
+  }
+  .tag-pill--active:hover {
+    background: rgba(124, 58, 237, 0.2);
+    border-color: rgba(124, 58, 237, 0.5);
+    color: #c4b5fd;
+  }
+}

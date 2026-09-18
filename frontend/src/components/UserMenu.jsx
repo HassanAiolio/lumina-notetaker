@@ -33,7 +33,7 @@ export const UserMenu = () => {
     <div className="relative" ref={containerRef}>
       <button
         onClick={() => setOpen((value) => !value)}
-        className="w-9 h-9 rounded-full overflow-hidden border border-white/10 hover:border-violet-500/40 transition-colors duration-200 flex items-center justify-center bg-white/5"
+        className="tap w-9 h-9 rounded-full overflow-hidden border border-white/10 hover:border-violet-500/40 transition-colors duration-200 flex items-center justify-center bg-white/5"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Account menu"
@@ -59,7 +59,7 @@ export const UserMenu = () => {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.97 }}
             transition={{ duration: 0.15 }}
-            className="absolute right-0 mt-2 w-56 glass-card p-1.5 z-50"
+            className="absolute right-0 mt-2 w-[min(14rem,calc(100vw-3rem))] glass-card p-1.5 z-50"
             role="menu"
             data-testid="user-menu"
           >
