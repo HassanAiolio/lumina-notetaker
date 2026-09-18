@@ -77,11 +77,10 @@ agenthub/agents/youtube/db
 .cache/
 
 # Mobile development
-android-sdk/ frontend/node_modules/.cache/default-development/2.pack
-frontend/node_modules/.cache/default-development/6.pack
-frontend/node_modules/.cache/default-development/0.pack
-frontend/node_modules/.cache/default-development/2.pack
--e 
+android-sdk/
 # Environment files
 *.env
 *.env.*
+# ...but the documented templates must be committed.
+!.env.example
+!*.env.example
