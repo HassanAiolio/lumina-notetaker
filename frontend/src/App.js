@@ -187,7 +187,7 @@ function Workspace() {
       </ErrorBoundary>
 
       <div className="relative z-10 min-h-screen">
-        <header className="px-6 md:px-12 py-6">
+        <header className="px-4 sm:px-6 md:px-12 py-5 md:py-6">
           <nav className="max-w-7xl mx-auto flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl bg-violet-600/20 border border-violet-500/30 flex items-center justify-center">
@@ -228,7 +228,7 @@ function Workspace() {
 
         {!isOnline && (
           <div
-            className="mx-6 md:mx-12 mb-4 max-w-3xl md:mx-auto flex items-center gap-2 text-sm text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5"
+            className="mx-4 sm:mx-6 md:mx-auto mb-4 max-w-3xl flex items-start gap-2 text-sm text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-2.5"
             role="status"
             data-testid="offline-banner"
           >
@@ -237,7 +237,7 @@ function Workspace() {
           </div>
         )}
 
-        <main className="px-6 md:px-12 pb-20 safe-bottom">
+        <main className="px-4 sm:px-6 md:px-12 pb-20 safe-bottom">
           <div className="max-w-3xl mx-auto">
             <AnimatePresence mode="wait">
               {activeTab === 'record' ? (
@@ -247,9 +247,9 @@ function Workspace() {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -20 }}
                   transition={{ duration: 0.25 }}
-                  className="space-y-12"
+                  className="space-y-8 md:space-y-12"
                 >
-                  <div className="pt-8 md:pt-16 text-left">
+                  <div className="pt-4 sm:pt-8 md:pt-16 text-left">
                     <motion.h1
                       initial={{ opacity: 0, y: 30 }}
                       animate={{ opacity: 1, y: 0 }}
@@ -339,7 +339,7 @@ function Workspace() {
 
 function BootScreen({ message, children }) {
   return (
-    <div className="min-h-screen flex items-center justify-center px-6" data-testid="boot-screen">
+    <div className="min-h-screen flex items-center justify-center px-4 sm:px-6" data-testid="boot-screen">
       <div className="noise-overlay" />
       <div className="text-center space-y-4">
         <Loader2 size={24} className="animate-spin text-violet-400 mx-auto" />
@@ -357,7 +357,7 @@ export default function App() {
 
   if (status === 'error') {
     return (
-      <div className="min-h-screen flex items-center justify-center px-6">
+      <div className="min-h-screen flex items-center justify-center px-4 sm:px-6">
         <div className="glass-card glass-card-highlight p-8 max-w-md text-center space-y-4">
           <h1 className="font-heading text-xl font-bold text-white">Can't reach the server</h1>
           <p className="text-sm text-zinc-400 leading-relaxed">

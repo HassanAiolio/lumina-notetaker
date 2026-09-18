@@ -157,8 +157,14 @@ body {
 }
 
 /* Gradient blob */
+/* Background glow.
+   Fixed, not absolute: these sit 200px outside the viewport by design, and an
+   absolutely positioned element that does so widens the page. On a phone that
+   made the layout ~590px wide against a 390px screen, so the browser shrank
+   everything to fit and let the page pan sideways. A fixed element contributes
+   nothing to the scrollable area, which removes the overflow at the source. */
 .gradient-blob {
-  position: absolute;
+  position: fixed;
   width: 500px;
   height: 500px;
   background: rgba(124, 58, 237, 0.15);
@@ -166,6 +172,16 @@ body {
   border-radius: 50%;
   pointer-events: none;
   mix-blend-mode: screen;
+  z-index: 0;
+}
+
+/* A 500px glow swamps a phone screen, and blurring it is expensive there. */
+@media (max-width: 640px) {
+  .gradient-blob {
+    width: 300px;
+    height: 300px;
+    filter: blur(70px);
+  }
 }
 
 /* Tag styles.
@@ -262,6 +278,26 @@ body {
 body {
   padding-left: env(safe-area-inset-left);
   padding-right: env(safe-area-inset-right);
+}
+
+/* Belt and braces against sideways scroll: overflow-x on body alone is only
+   honoured when it propagates to the viewport, which mobile Safari does not
+   do reliably. Nothing here should ever be wider than the screen. */
+html,
+body {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+/* A pasted URL or a long unbroken word in a transcript would otherwise push
+   the page wider than the phone. */
+p,
+li,
+h1,
+h2,
+h3,
+h4 {
+  overflow-wrap: break-word;
 }
 .safe-bottom {
   padding-bottom: max(1.25rem, env(safe-area-inset-bottom));

@@ -25,7 +25,7 @@ export class ErrorBoundary extends React.Component {
     if (this.props.silent) return this.props.fallback ?? null;
 
     return (
-      <div className="min-h-screen flex items-center justify-center px-6" data-testid="error-boundary">
+      <div className="min-h-screen flex items-center justify-center px-4 sm:px-6" data-testid="error-boundary">
         <div className="glass-card glass-card-highlight p-8 max-w-md text-center space-y-4">
           <div className="w-12 h-12 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto">
             <AlertTriangle size={22} className="text-red-400" />

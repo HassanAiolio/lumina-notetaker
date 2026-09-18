@@ -20,7 +20,7 @@ export const SignIn = () => {
   }, [renderSignInButton, signingIn]);
 
   return (
-    <div className="min-h-screen relative flex items-center justify-center px-6 py-16" data-testid="sign-in">
+    <div className="min-h-screen relative flex items-center justify-center px-4 sm:px-6 py-10 sm:py-16" data-testid="sign-in">
       <div className="noise-overlay" />
       <div className="gradient-blob top-[-220px] left-[-180px] opacity-50" />
       <div className="gradient-blob bottom-[-240px] right-[-200px] opacity-25" />
@@ -48,7 +48,7 @@ export const SignIn = () => {
           own private space.
         </p>
 
-        <div className="mt-10 glass-card glass-card-highlight p-6 space-y-6">
+        <div className="mt-8 md:mt-10 glass-card glass-card-highlight p-5 sm:p-6 space-y-6">
           <div className="space-y-4">
             {FEATURES.map(({ icon: Icon, title, body }) => (
               <div key={title} className="flex items-start gap-3">
