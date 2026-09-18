@@ -170,6 +170,14 @@ python -m pytest
 
 - **Set `JWT_SECRET`.** Without it the server generates a random secret at boot, so every
   restart signs everyone out.
+- **Python version on Render:** `runtime.txt` is Heroku's convention and Render ignores it —
+  it will build on whatever its current default is. To pin a version, set a `PYTHON_VERSION`
+  environment variable in the Render dashboard, or add a `.python-version` file. The test
+  suite is green on 3.11 through 3.13.
+- **Verify the dependency list in a clean environment before deploying.** `google-auth`
+  declares `requests` only as an extra, so `import google.auth.transport.requests` succeeded
+  locally (where `requests` came in via something else) and failed on Render. `python -m venv`
+  into a throwaway directory, `pip install -r requirements.txt`, then import `server`.
 - **`CORS_ORIGINS` must list your real frontend origin** — no trailing slash.
 - **Health checks:** point the platform at `/api/health`, which returns 200 whenever the
   process is alive. `/api/health/ready` returns 503 until the database and both credentials

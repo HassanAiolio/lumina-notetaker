@@ -8,4 +8,7 @@ httpx
 pydantic
 python-multipart
 PyJWT
-google-auth
+# The [requests] extra matters: google.auth.transport.requests imports the
+# requests library, and plain google-auth only declares it as an extra. Without
+# it the app installs cleanly and then fails at import time.
+google-auth[requests]
