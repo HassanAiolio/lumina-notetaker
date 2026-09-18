@@ -1,60 +1,45 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Trash2, Tag, Clock, ChevronDown, ChevronUp } from 'lucide-react';
-import { Input } from '../components/ui/input';
-import { getNotes, deleteNote, getAllTags } from '../services/api';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import {
+  ChevronDown, Clock, FileText, Loader2, Search, Tag, Trash2, TriangleAlert, X,
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { Input } from './ui/input';
 import { ExportButton } from './ExportButton';
+import { deleteNote, errorMessage, getAllTags, getNotes } from '../services/api';
+import { languageName, sectionEntries, sectionLabel } from '../lib/notes';
+
+const PAGE_SIZE = 20;
 
 const BULLET_COLORS = [
-  'bg-violet-500',
-  'bg-emerald-500',
-  'bg-amber-500',
-  'bg-sky-500',
-  'bg-rose-500',
-  'bg-pink-500',
+  'bg-violet-500', 'bg-emerald-500', 'bg-amber-500',
+  'bg-sky-500', 'bg-rose-500', 'bg-pink-500',
 ];
 
-const formatSectionTitle = (key) =>
-  key
-    .replace(/_/g, ' ')
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const entries = useMemo(() => sectionEntries(note), [note]);
 
-const NoteCard = ({ note, onDelete, isExpanded, onToggle }) => {
-  const date = new Date(note.created_at);
-  const formatted = date.toLocaleDateString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-
-  // Support both new dynamic sections and old shape
-  const sections = note.sections && Object.keys(note.sections).length > 0
-    ? note.sections
-    : {
-        ...(note.summary?.length       ? { summary: note.summary }             : {}),
-        ...(note.key_decisions?.length ? { key_decisions: note.key_decisions } : {}),
-        ...(note.action_items?.length  ? { action_items: note.action_items }   : {}),
-      };
-
-  const sectionEntries = Object.entries(sections).filter(
-    ([, items]) => Array.isArray(items) && items.length > 0
-  );
+  const created = new Date(note.created_at);
+  const formatted = Number.isNaN(created.getTime())
+    ? ''
+    : created.toLocaleDateString(undefined, {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
 
   return (
     <motion.div
       layout
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
+      exit={{ opacity: 0, y: -10, transition: { duration: 0.15 } }}
       className="glass-card glass-card-highlight p-4 md:p-5 hover:border-violet-500/20 transition-colors duration-300"
       data-testid={`note-card-${note.id}`}
     >
-      {/* Header */}
       <div className="flex items-start justify-between gap-3">
-        <button onClick={onToggle} className="flex-1 text-left">
-          <div className="flex items-center gap-2">
+        <button onClick={onToggle} className="flex-1 text-left min-w-0" aria-expanded={isExpanded}>
+          <div className="flex items-center gap-2 flex-wrap">
             <h3 className="font-heading text-base font-semibold text-white leading-snug">
               {note.title}
             </h3>
@@ -63,31 +48,68 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle }) => {
                 {note.type}
               </span>
             )}
+            {note.degraded && (
+              <span
+                className="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20 text-amber-400 font-medium inline-flex items-center gap-1"
+                title="Structured locally because the AI was unavailable"
+              >
+                <TriangleAlert size={10} />
+                Offline summary
+              </span>
+            )}
           </div>
-          <div className="flex items-center gap-2 mt-1.5">
-            <Clock size={11} className="text-zinc-600" />
-            <span className="text-xs text-zinc-600">{formatted}</span>
+          <div className="flex items-center gap-3 mt-1.5 text-xs text-zinc-600">
+            <span className="flex items-center gap-1.5">
+              <Clock size={11} />
+              {formatted}
+            </span>
+            {languageName(note.language) && <span>{languageName(note.language)}</span>}
           </div>
         </button>
-        <div className="flex items-center gap-1.5">
+
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           <button
             onClick={onToggle}
             className="p-1.5 rounded-lg hover:bg-white/5 text-zinc-500 hover:text-zinc-300 transition-colors duration-200"
+            aria-label={isExpanded ? 'Collapse note' : 'Expand note'}
             data-testid={`toggle-note-${note.id}`}
           >
-            {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            <ChevronDown
+              size={14}
+              className={`transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+            />
           </button>
-          <button
-            onClick={() => onDelete(note.id)}
-            className="p-1.5 rounded-lg hover:bg-red-500/10 text-zinc-600 hover:text-red-400 transition-colors duration-200"
-            data-testid={`delete-note-${note.id}`}
-          >
-            <Trash2 size={14} />
-          </button>
+          {confirmingDelete ? (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => onDelete(note.id)}
+                disabled={isDeleting}
+                className="px-2 py-1 rounded-lg text-[11px] font-medium bg-red-500/15 text-red-400 hover:bg-red-500/25 transition-colors duration-200"
+                data-testid={`confirm-delete-${note.id}`}
+              >
+                {isDeleting ? '…' : 'Delete'}
+              </button>
+              <button
+                onClick={() => setConfirmingDelete(false)}
+                className="p-1 rounded-lg text-zinc-500 hover:text-zinc-300"
+                aria-label="Cancel delete"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmingDelete(true)}
+              className="p-1.5 rounded-lg hover:bg-red-500/10 text-zinc-600 hover:text-red-400 transition-colors duration-200"
+              aria-label="Delete note"
+              data-testid={`delete-note-${note.id}`}
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Tags */}
       {note.tags?.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-3">
           {note.tags.map((tag) => (
@@ -96,48 +118,64 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle }) => {
         </div>
       )}
 
-      {/* Expanded content */}
-      <AnimatePresence>
+      <AnimatePresence initial={false}>
         {isExpanded && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
             className="overflow-hidden"
           >
             <div className="mt-4 pt-4 border-t border-white/5 space-y-4">
-              {sectionEntries.length > 0 ? (
-                sectionEntries.map(([key, items], idx) => (
+              {entries.length > 0 ? (
+                entries.map(([key, items], index) => (
                   <div key={key}>
                     <p className="text-xs text-zinc-500 uppercase tracking-widest mb-2">
-                      {formatSectionTitle(key)}
+                      {sectionLabel(key, note.labels)}
                     </p>
                     <ul className="space-y-1.5">
-                      {items.map((item, i) => (
-                        <motion.li
-                          key={i}
-                          initial={{ opacity: 0, x: -8 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ delay: i * 0.04 }}
-                          className="text-sm text-zinc-300 flex items-start gap-2"
+                      {items.map((item, itemIndex) => (
+                        <li
+                          key={`${key}-${itemIndex}`}
+                          className="text-sm text-zinc-300 flex items-start gap-2 leading-relaxed"
                         >
                           <span
                             className={`mt-1.5 w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                              BULLET_COLORS[idx % BULLET_COLORS.length]
+                              BULLET_COLORS[index % BULLET_COLORS.length]
                             }`}
                           />
-                          {item}
-                        </motion.li>
+                          <span>{item}</span>
+                        </li>
                       ))}
                     </ul>
                   </div>
                 ))
               ) : (
-                <p className="text-sm text-zinc-600">No content available.</p>
+                <p className="text-sm text-zinc-600">This note has no sections.</p>
               )}
 
-              <div className="pt-2">
-                <ExportButton note={{ ...note, sections }} />
+              {note.raw_transcript && (
+                <div className="pt-1">
+                  <button
+                    onClick={() => setShowTranscript((value) => !value)}
+                    className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 uppercase tracking-widest transition-colors duration-200"
+                    aria-expanded={showTranscript}
+                    data-testid={`toggle-transcript-${note.id}`}
+                  >
+                    <FileText size={12} />
+                    {showTranscript ? 'Hide transcript' : 'Show transcript'}
+                  </button>
+                  {showTranscript && (
+                    <p className="mt-2 text-sm text-zinc-400 leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto pr-2 bg-black/30 rounded-lg p-3 border border-white/5">
+                      {note.raw_transcript}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="pt-1">
+                <ExportButton note={note} />
               </div>
             </div>
           </motion.div>
@@ -149,69 +187,123 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle }) => {
 
 export const NoteHistory = ({ refreshTrigger }) => {
   const [notes, setNotes] = useState([]);
+  const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedTag, setSelectedTag] = useState('');
   const [allTags, setAllTags] = useState([]);
   const [expandedId, setExpandedId] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [deletingId, setDeletingId] = useState('');
+  const [error, setError] = useState('');
 
-  const fetchNotes = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [notesData, tagsData] = await Promise.all([
-        getNotes({ search: search || undefined, tag: selectedTag || undefined }),
-        getAllTags(),
-      ]);
-      setNotes(notesData);
-      setAllTags(tagsData);
-    } catch (err) {
-      console.error('Failed to fetch notes:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [search, selectedTag]);
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
-    fetchNotes();
-  }, [fetchNotes, refreshTrigger]);
-
-  const [debouncedSearch, setDebouncedSearch] = useState('');
-  useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
     return () => clearTimeout(timer);
   }, [search]);
 
+  // One effect owns fetching. Keyed on the debounced search so typing does not
+  // fire a request per keystroke, and stale responses are discarded by id.
   useEffect(() => {
-    if (debouncedSearch !== undefined) fetchNotes();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedSearch]);
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
 
-  const handleDelete = async (id) => {
+    setLoading(true);
+    setError('');
+
+    (async () => {
+      try {
+        const [page, tags] = await Promise.all([
+          getNotes({
+            search: debouncedSearch || undefined,
+            tag: selectedTag || undefined,
+            limit: PAGE_SIZE,
+            offset: 0,
+          }),
+          getAllTags(),
+        ]);
+        if (requestIdRef.current !== requestId) return;
+        setNotes(page.items);
+        setTotal(page.total);
+        setAllTags(tags);
+      } catch (err) {
+        if (requestIdRef.current !== requestId) return;
+        setError(errorMessage(err, 'Could not load your notes.'));
+      } finally {
+        if (requestIdRef.current === requestId) setLoading(false);
+      }
+    })();
+  }, [debouncedSearch, selectedTag, refreshTrigger]);
+
+  const loadMore = useCallback(async () => {
+    setLoadingMore(true);
     try {
-      await deleteNote(id);
-      setNotes(notes.filter((n) => n.id !== id));
+      const page = await getNotes({
+        search: debouncedSearch || undefined,
+        tag: selectedTag || undefined,
+        limit: PAGE_SIZE,
+        offset: notes.length,
+      });
+      setNotes((current) => {
+        const seen = new Set(current.map((note) => note.id));
+        return [...current, ...page.items.filter((note) => !seen.has(note.id))];
+      });
+      setTotal(page.total);
     } catch (err) {
-      console.error('Failed to delete note:', err);
+      toast.error(errorMessage(err, 'Could not load more notes.'));
+    } finally {
+      setLoadingMore(false);
     }
-  };
+  }, [debouncedSearch, notes.length, selectedTag]);
+
+  const handleDelete = useCallback(
+    async (id) => {
+      setDeletingId(id);
+      const previous = notes;
+      // Optimistic: the row disappears immediately and comes back on failure.
+      setNotes((current) => current.filter((note) => note.id !== id));
+      setTotal((current) => Math.max(0, current - 1));
+      try {
+        await deleteNote(id);
+        toast.success('Note deleted');
+      } catch (err) {
+        setNotes(previous);
+        setTotal(previous.length);
+        toast.error(errorMessage(err, 'Could not delete that note.'));
+      } finally {
+        setDeletingId('');
+      }
+    },
+    [notes],
+  );
+
+  const hasFilters = Boolean(debouncedSearch || selectedTag);
 
   return (
     <div className="space-y-6" data-testid="note-history">
-      {/* Search */}
-      <div className="flex flex-col sm:flex-row gap-3">
-        <div className="relative flex-1">
-          <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search notes..."
-            className="pl-9 h-10 bg-black/50 border-white/10 text-zinc-200 placeholder:text-zinc-600 rounded-xl text-sm"
-            data-testid="search-notes-input"
-          />
-        </div>
+      <div className="relative">
+        <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+        <Input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search titles, transcripts and tags…"
+          className="pl-9 pr-9 h-10 bg-black/50 border-white/10 text-zinc-200 placeholder:text-zinc-600 rounded-xl text-sm"
+          data-testid="search-notes-input"
+        />
+        {search && (
+          <button
+            onClick={() => setSearch('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600 hover:text-zinc-300"
+            aria-label="Clear search"
+          >
+            <X size={14} />
+          </button>
+        )}
       </div>
 
-      {/* Tag filter */}
       {allTags.length > 0 && (
         <div className="flex flex-wrap gap-2" data-testid="tag-filter">
           <button
@@ -239,33 +331,75 @@ export const NoteHistory = ({ refreshTrigger }) => {
         </div>
       )}
 
-      {/* Notes list */}
+      {error && (
+        <div
+          className="flex items-start gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3"
+          role="alert"
+        >
+          <TriangleAlert size={15} className="flex-shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+
       {loading ? (
-        <div className="flex items-center justify-center py-12">
-          <div className="w-6 h-6 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+        <div className="space-y-3" data-testid="notes-skeleton">
+          {[0, 1, 2].map((index) => (
+            <div key={index} className="glass-card p-5 animate-pulse">
+              <div className="h-4 w-1/3 bg-white/5 rounded" />
+              <div className="h-3 w-1/4 bg-white/5 rounded mt-3" />
+            </div>
+          ))}
         </div>
       ) : notes.length === 0 ? (
-        <div className="text-center py-16">
-          <p className="text-zinc-600 text-sm">
-            {search || selectedTag
-              ? 'No notes match your search.'
-              : 'No saved notes yet. Start recording!'}
+        <div className="text-center py-16" data-testid="notes-empty">
+          <p className="text-zinc-500 text-sm">
+            {hasFilters ? 'No notes match your search.' : 'No saved notes yet. Record something!'}
           </p>
+          {hasFilters && (
+            <button
+              onClick={() => {
+                setSearch('');
+                setSelectedTag('');
+              }}
+              className="mt-3 text-xs text-violet-400 hover:text-violet-300 transition-colors duration-200"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
       ) : (
-        <div className="space-y-3">
-          <AnimatePresence>
-            {notes.map((note) => (
-              <NoteCard
-                key={note.id}
-                note={note}
-                onDelete={handleDelete}
-                isExpanded={expandedId === note.id}
-                onToggle={() => setExpandedId(expandedId === note.id ? null : note.id)}
-              />
-            ))}
-          </AnimatePresence>
-        </div>
+        <>
+          <p className="text-xs text-zinc-600">
+            {total} note{total === 1 ? '' : 's'}
+            {hasFilters ? ' found' : ''}
+          </p>
+          <div className="space-y-3">
+            <AnimatePresence initial={false}>
+              {notes.map((note) => (
+                <NoteCard
+                  key={note.id}
+                  note={note}
+                  onDelete={handleDelete}
+                  isDeleting={deletingId === note.id}
+                  isExpanded={expandedId === note.id}
+                  onToggle={() => setExpandedId(expandedId === note.id ? null : note.id)}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+
+          {notes.length < total && (
+            <button
+              onClick={loadMore}
+              disabled={loadingMore}
+              className="w-full py-3 rounded-xl text-sm font-medium bg-white/5 hover:bg-white/10 text-zinc-300 border border-white/10 transition-colors duration-200 flex items-center justify-center gap-2"
+              data-testid="load-more-btn"
+            >
+              {loadingMore && <Loader2 size={14} className="animate-spin" />}
+              {loadingMore ? 'Loading…' : `Load more (${total - notes.length} left)`}
+            </button>
+          )}
+        </>
       )}
     </div>
   );

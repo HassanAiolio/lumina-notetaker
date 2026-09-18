@@ -1,88 +1,124 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
+/**
+ * Web Speech API wrapper used only for live captions while recording.
+ *
+ * The transcript that actually gets saved comes from the server, which can
+ * detect the language and works in every browser. This hook is decoration: if
+ * it is unsupported, blocked, or fights the recorder for the microphone, it
+ * disables itself quietly and nothing is lost.
+ */
 export const useSpeechRecognition = () => {
-  const [transcript, setTranscript] = useState('');
-  const [isListening, setIsListening] = useState(false);
-  const [isSupported, setIsSupported] = useState(false);
-  const [interimText, setInterimText] = useState('');
+  const [captions, setCaptions] = useState('');
+  const [interim, setInterim] = useState('');
+  const [isActive, setIsActive] = useState(false);
+
   const recognitionRef = useRef(null);
-  const finalTranscriptRef = useRef('');
+  const finalRef = useRef('');
+  const wantsToRunRef = useRef(false);
+  const restartsRef = useRef(0);
 
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    setIsSupported(!!SpeechRecognition);
-  }, []);
+  const isSupported =
+    typeof window !== 'undefined' &&
+    !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 
-  const startListening = useCallback(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    recognition.onstart = () => {
-      setIsListening(true);
-    };
-
-    recognition.onresult = (event) => {
-      let interim = '';
-      let final = finalTranscriptRef.current;
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result.isFinal) {
-          final += result[0].transcript + ' ';
-          finalTranscriptRef.current = final;
-        } else {
-          interim += result[0].transcript;
-        }
-      }
-
-      setTranscript(final);
-      setInterimText(interim);
-    };
-
-    recognition.onerror = (event) => {
-      if (event.error !== 'aborted') {
-        console.error('Speech recognition error:', event.error);
-      }
-      setIsListening(false);
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-    };
-
-    recognitionRef.current = recognition;
-    finalTranscriptRef.current = transcript;
-    recognition.start();
-  }, [transcript]);
-
-  const stopListening = useCallback(() => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
+  const cleanup = useCallback(() => {
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    if (!recognition) return;
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+    try {
+      recognition.abort();
+    } catch (err) {
+      /* already stopped */
     }
-    setIsListening(false);
-    setInterimText('');
   }, []);
 
-  const resetTranscript = useCallback(() => {
-    setTranscript('');
-    setInterimText('');
-    finalTranscriptRef.current = '';
+  useEffect(() => cleanup, [cleanup]);
+
+  const start = useCallback(
+    (locale = 'en-US') => {
+      if (!isSupported) return;
+
+      cleanup();
+      finalRef.current = '';
+      restartsRef.current = 0;
+      setCaptions('');
+      setInterim('');
+      wantsToRunRef.current = true;
+
+      const spawn = () => {
+        if (!wantsToRunRef.current) return;
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = locale;
+
+        recognition.onresult = (event) => {
+          let interimText = '';
+          for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            const result = event.results[i];
+            if (result.isFinal) {
+              finalRef.current += `${result[0].transcript.trim()} `;
+            } else {
+              interimText += result[0].transcript;
+            }
+          }
+          setCaptions(finalRef.current);
+          setInterim(interimText);
+        };
+
+        recognition.onerror = (event) => {
+          // 'no-speech' and 'aborted' are routine; the rest mean captions are
+          // not going to work here, so stop trying rather than loop.
+          if (event.error !== 'no-speech' && event.error !== 'aborted') {
+            wantsToRunRef.current = false;
+            setIsActive(false);
+          }
+        };
+
+        recognition.onend = () => {
+          // Chrome ends the session after a pause. Restart while we still want
+          // captions, with a ceiling so a hard failure cannot spin forever.
+          if (wantsToRunRef.current && restartsRef.current < 200) {
+            restartsRef.current += 1;
+            setTimeout(spawn, 250);
+          } else {
+            setIsActive(false);
+          }
+        };
+
+        try {
+          recognition.start();
+          recognitionRef.current = recognition;
+          setIsActive(true);
+        } catch (err) {
+          wantsToRunRef.current = false;
+          setIsActive(false);
+        }
+      };
+
+      spawn();
+    },
+    [cleanup, isSupported],
+  );
+
+  const stop = useCallback(() => {
+    wantsToRunRef.current = false;
+    cleanup();
+    setIsActive(false);
+    setInterim('');
+  }, [cleanup]);
+
+  const reset = useCallback(() => {
+    finalRef.current = '';
+    setCaptions('');
+    setInterim('');
   }, []);
 
-  return {
-    transcript,
-    interimText,
-    isListening,
-    isSupported,
-    startListening,
-    stopListening,
-    resetTranscript,
-    setTranscript,
-  };
+  return { captions, interim, isActive, isSupported, start, stop, reset };
 };
