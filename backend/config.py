@@ -55,7 +55,11 @@ class Settings:
     CORS_ORIGINS: list[str] = _csv("CORS_ORIGINS", "http://localhost:3000")
 
     # ── Limits ────────────────────────────────────────────────────────────
-    MAX_TRANSCRIPT_CHARS: int = _int("MAX_TRANSCRIPT_CHARS", 200_000)
+    # Three hours of speech is roughly 170k characters, and more in a language
+    # that writes longer than English, so 200k used to sit right on top of what
+    # the client can now record. 400k is ~100k tokens to summarize: a fraction
+    # of the model's context window.
+    MAX_TRANSCRIPT_CHARS: int = _int("MAX_TRANSCRIPT_CHARS", 400_000)
     MAX_AUDIO_BYTES: int = _int("MAX_AUDIO_BYTES", 26_214_400)  # 25 MiB
     # Audio longer than this in a single request is split before transcription.
     AUDIO_CHUNK_SECONDS: int = _int("AUDIO_CHUNK_SECONDS", 240)

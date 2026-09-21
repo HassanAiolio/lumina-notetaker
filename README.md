@@ -31,8 +31,10 @@ signed-in user and are never visible to anyone else.
 - **Notes in your language** — the summary, the bullets and even the section headings come back
   in the language of the recording. Section keys stay stable underneath so search and export
   keep working.
-- **Long recordings** — audio is converted to 16 kHz mono WAV and split at quiet moments into
-  chunks, each transcribed with the tail of the previous one for consistent spelling.
+- **Long recordings** — up to three hours. Audio is captured in segments, converted to 16 kHz
+  mono WAV and split at quiet moments into chunks, each transcribed with the tail of the
+  previous one for consistent spelling. Nothing is held whole, so a three hour recording costs
+  no more memory than a five minute one.
 - **Fail-safes throughout** — model fallback chain, retries with backoff, a local extraction
   that still produces usable notes when the AI is down, retryable transcription, a downloadable
   copy of the audio, and a draft transcript that survives a page reload.
@@ -249,6 +251,22 @@ speak — if it fails, nothing is lost.
 Browsers record WebM/Opus (Chrome) or MP4/AAC (Safari). Rather than depend on container support,
 the client decodes locally and re-encodes to 16 kHz mono PCM, then splits long recordings at the
 quietest point near each boundary so a cut does not land mid-word.
+
+Two details make the length limit three hours rather than about forty minutes:
+
+- **Decoding asks for 16 kHz up front.** `new AudioContext()` adopts the output device's rate,
+  usually 48 kHz, and `decodeAudioData` then materialises the audio at that rate before anything
+  downsamples it — three times the memory, for samples about to be thrown away. Requesting the
+  target rate on the decoding context skips that buffer entirely.
+- **Nothing is held whole.** The recorder rotates MediaRecorder every five minutes, so capture
+  produces a list of separately decodable segments rather than one blob. `streamWavChunks`
+  decodes one segment at a time and yields each WAV chunk as the previous upload finishes, so
+  peak memory follows the segment length instead of the recording length. Audio left over at the
+  end of a segment is carried into the next, so a rotation does not show up as a short chunk.
+
+Between them these replace a pipeline whose peak was roughly 1.2 GB for a one-hour recording —
+enough that an hour-long meeting failed outright, reported as a browser that could not decode
+the audio.
 
 ### The 3D scene reacts to your voice
 

@@ -9,7 +9,9 @@ import { Textarea } from './ui/textarea';
 import { LanguageSelect } from './LanguageSelect';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
-import { formatDuration, toWavChunks } from '../lib/audio';
+import {
+  AudioDecodeError, estimateChunkCount, formatDuration, streamWavChunks,
+} from '../lib/audio';
 import { errorMessage, transcribeChunk } from '../services/api';
 import { languageName } from '../lib/notes';
 
@@ -26,6 +28,25 @@ const LevelMeter = ({ levels, paused }) => (
     ))}
   </div>
 );
+
+/**
+ * What to tell someone when the audio never got as far as the server. These
+ * failures all used to read "could not be decoded by this browser", which sent
+ * people looking for a browser problem when they had really just recorded for
+ * longer than the device could prepare in one go.
+ */
+const decodeErrorMessage = (err) => {
+  switch (err?.reason) {
+    case 'empty':
+      return 'That recording contains no audio. Check that your microphone is working.';
+    case 'unsupported':
+      return 'This browser cannot process audio. Try Chrome, Edge, Firefox or Safari, or use the Text tab.';
+    case 'exhausted':
+      return 'This device ran out of memory while preparing the audio. Your recording is kept — save it, close some tabs, and try again.';
+    default:
+      return err?.message || 'The recording could not be prepared for transcription.';
+  }
+};
 
 export const Recorder = ({
   transcript,
@@ -45,8 +66,10 @@ export const Recorder = ({
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [pipelineError, setPipelineError] = useState('');
   // The last recording is kept so a failed transcription can be retried, or the
-  // audio downloaded, instead of asking someone to say it all again.
-  const [pendingAudio, setPendingAudio] = useState(null);
+  // audio downloaded, instead of asking someone to say it all again. It holds
+  // the capture segments rather than one blob, which is also what the
+  // transcription pipeline wants back on a retry.
+  const [pendingRecording, setPendingRecording] = useState(null);
 
   const recorder = useAudioRecorder({
     levelRef: audioLevelRef,
@@ -77,23 +100,27 @@ export const Recorder = ({
     [languages],
   );
 
-  /** Send the recording to the server one chunk at a time. */
+  /**
+   * Encode and upload the recording one chunk at a time.
+   *
+   * Chunks are pulled from the encoder as each upload finishes rather than all
+   * built up front, so only one chunk of audio is ever in memory and the first
+   * upload starts as soon as the first four minutes have been encoded instead
+   * of after the whole recording has.
+   */
   const runTranscription = useCallback(
-    async (blob) => {
-      setPipelineError('');
-      setStage('encoding');
-
-      let chunks;
-      try {
-        chunks = await toWavChunks(blob);
-      } catch (err) {
-        setStage('idle');
-        setPipelineError(err.message || 'The recording could not be prepared for transcription.');
+    async (recording) => {
+      const segments = recording?.segments || [];
+      if (!segments.length) {
+        setPipelineError('Nothing was recorded. Check that your microphone is working.');
         return;
       }
 
-      setStage('transcribing');
-      setProgress({ done: 0, total: chunks.length });
+      setPipelineError('');
+      setStage('encoding');
+      // Chunks arrive lazily, so the real total is only known at the end. The
+      // recorded length estimates it to within one chunk.
+      setProgress({ done: 0, total: estimateChunkCount(recording.seconds) });
 
       const controller = new AbortController();
       abortRef.current = controller;
@@ -101,11 +128,14 @@ export const Recorder = ({
       const pieces = [];
       let context = '';
       let detected = '';
+      let done = 0;
 
       try {
-        for (let index = 0; index < chunks.length; index += 1) {
+        for await (const chunk of streamWavChunks(segments)) {
+          if (controller.signal.aborted) break;
+          setStage('transcribing');
           const result = await transcribeChunk({
-            blob: chunks[index].blob,
+            blob: chunk.blob,
             language,
             context,
             signal: controller.signal,
@@ -117,20 +147,25 @@ export const Recorder = ({
           if (!detected && result.language && result.language !== 'auto') {
             detected = result.language;
           }
-          setProgress({ done: index + 1, total: chunks.length });
+          done += 1;
+          // Captured per iteration: the updater may run after `done` has moved on.
+          const completed = done;
+          setProgress((previous) => ({
+            done: completed,
+            total: Math.max(previous.total, completed),
+          }));
         }
       } catch (err) {
-        if (controller.signal.aborted) {
-          setStage('idle');
-          return;
-        }
         setStage('idle');
+        if (controller.signal.aborted) return;
         // Whatever came back before the failure is still worth keeping.
         if (pieces.length) {
           onTranscriptChange([transcript, pieces.join(' ')].filter(Boolean).join(' ').trim());
           setPipelineError(
             'Only part of the recording could be transcribed. The text so far is below, and the audio is kept if you want to retry.',
           );
+        } else if (err instanceof AudioDecodeError) {
+          setPipelineError(decodeErrorMessage(err));
         } else {
           setPipelineError(errorMessage(err, 'Transcription failed.'));
         }
@@ -140,6 +175,7 @@ export const Recorder = ({
       }
 
       setStage('idle');
+      if (controller.signal.aborted) return;
       const text = pieces.join(' ').trim();
 
       if (!text) {
@@ -147,7 +183,7 @@ export const Recorder = ({
         return;
       }
 
-      setPendingAudio(null);
+      setPendingRecording(null);
       if (detected) onDetectedLanguage?.(detected);
       onTranscriptChange([transcript, text].filter(Boolean).join(' ').trim());
       toast.success(
@@ -159,7 +195,7 @@ export const Recorder = ({
 
   const handleStart = useCallback(async () => {
     setPipelineError('');
-    setPendingAudio(null);
+    setPendingRecording(null);
     speech.reset();
     const started = await recorder.start();
     if (started) speech.start(localeFor(language));
@@ -167,33 +203,45 @@ export const Recorder = ({
 
   const handleStop = useCallback(async () => {
     speech.stop();
-    const blob = await recorder.stop();
-    if (!blob) {
+    const recording = await recorder.stop();
+    if (!recording) {
       setPipelineError('Nothing was recorded. Check that your microphone is working.');
       return;
     }
-    setPendingAudio(blob);
-    await runTranscription(blob);
+    setPendingRecording(recording);
+    await runTranscription(recording);
   }, [recorder, runTranscription, speech]);
 
   const handleDiscard = useCallback(async () => {
     speech.stop();
     await recorder.cancel();
-    setPendingAudio(null);
+    setPendingRecording(null);
     setPipelineError('');
   }, [recorder, speech]);
 
   const handleDownloadAudio = useCallback(() => {
-    if (!pendingAudio) return;
-    const url = URL.createObjectURL(pendingAudio);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `recording-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.webm`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [pendingAudio]);
+    const segments = pendingRecording?.segments || [];
+    if (!segments.length) return;
+
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const extension = (pendingRecording.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
+
+    // A long recording is several files. Browsers throttle downloads fired in
+    // the same tick, so they are spaced out instead of issued all at once.
+    segments.forEach((segment, index) => {
+      const suffix = segments.length > 1 ? `-part${index + 1}` : '';
+      setTimeout(() => {
+        const url = URL.createObjectURL(segment);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `recording-${stamp}${suffix}.${extension}`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }, index * 400);
+    });
+  }, [pendingRecording]);
 
   const liveText = `${speech.captions}${speech.interim}`.trim();
   const nearLimit = recorder.seconds > recorder.maxSeconds - 120;
@@ -328,7 +376,7 @@ export const Recorder = ({
                     {stage === 'encoding'
                       ? 'Preparing audio…'
                       : progress.total > 1
-                        ? `Transcribing part ${progress.done + 1} of ${progress.total}…`
+                        ? `Transcribing part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
                         : 'Transcribing…'}
                   </span>
                   {stage === 'transcribing' && progress.total > 1 && (
@@ -408,10 +456,10 @@ export const Recorder = ({
               <AlertCircle size={15} className="flex-shrink-0 mt-0.5" />
               <span className="leading-relaxed">{pipelineError || recorder.error}</span>
             </div>
-            {pendingAudio && (
+            {pendingRecording && (
               <div className="flex flex-wrap gap-2 pl-6">
                 <button
-                  onClick={() => runTranscription(pendingAudio)}
+                  onClick={() => runTranscription(pendingRecording)}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-200 border border-white/10 transition-colors duration-200"
                   data-testid="retry-transcription-btn"
                 >
@@ -423,7 +471,9 @@ export const Recorder = ({
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-200 border border-white/10 transition-colors duration-200"
                 >
                   <Download size={12} />
-                  Save the audio
+                  {pendingRecording.segments.length > 1
+                    ? `Save the audio (${pendingRecording.segments.length} files)`
+                    : 'Save the audio'}
                 </button>
               </div>
             )}
