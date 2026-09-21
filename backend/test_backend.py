@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import gemini  # noqa: E402
 import languages  # noqa: E402
 import ratelimit  # noqa: E402
+import retranscribe  # noqa: E402
 import summarizer  # noqa: E402
 import transcription  # noqa: E402
 from models import NoteCreate, NoteUpdate, SummarizeRequest  # noqa: E402
@@ -256,3 +257,43 @@ def test_rate_limit_allows_then_blocks():
     assert excinfo.value.status_code == 429
     # A different key has its own budget.
     ratelimit.check("user:other", 3, 60)
+
+
+# -- retranscribe: loop cleanup ------------------------------------------------
+# This one deletes words from someone's transcript, so it gets pinned down.
+
+def test_drop_loops_cuts_a_decoder_loop():
+    parts = ["Bonjour.", "Ça démarre mal.", "Ça démarre mal.", "Ça démarre mal.",
+             "Ça démarre mal.", "Ensuite."]
+    cleaned, removed = retranscribe.drop_loops(parts)
+    assert cleaned == ["Bonjour.", "Ça démarre mal.", "Ça démarre mal.", "Ensuite."]
+    assert removed == 2
+
+
+def test_drop_loops_leaves_real_repetition_alone():
+    # People really do say things twice; only a longer run is the model stuttering.
+    parts = ["OK.", "OK.", "Donc voilà.", "Pourquoi ?", "Pourquoi ?"]
+    cleaned, removed = retranscribe.drop_loops(parts)
+    assert cleaned == parts
+    assert removed == 0
+
+
+def test_drop_loops_only_collapses_adjacent_repeats():
+    # The same phrase coming back later in the lecture is not a loop.
+    parts = ["Un exemple.", "Autre chose.", "Un exemple.", "Encore autre chose.", "Un exemple."]
+    cleaned, removed = retranscribe.drop_loops(parts)
+    assert cleaned == parts
+    assert removed == 0
+
+
+def test_drop_loops_never_invents_or_reorders():
+    parts = ["a", "b", "b", "b", "c", "c", "c", "c", "d"]
+    cleaned, removed = retranscribe.drop_loops(parts)
+    assert removed == len(parts) - len(cleaned)
+    assert set(cleaned) <= set(parts)          # nothing new appeared
+    assert [p for p in parts if p in cleaned][:1] == cleaned[:1]  # order preserved
+    assert cleaned == ["a", "b", "b", "c", "c", "d"]
+
+
+def test_drop_loops_handles_empty_input():
+    assert retranscribe.drop_loops([]) == ([], 0)

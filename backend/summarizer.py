@@ -10,12 +10,37 @@ logger = logging.getLogger(__name__)
 # Stable machine keys per content type. The model also returns a localized
 # label for each key so the UI can show "Points cles" without us losing the
 # key that everything else (filtering, export, old notes) is built on.
+# A plan is a menu, not a checklist: the model is told to drop any section it
+# has nothing real for, so a long list costs nothing when it does not apply.
+# LECTURE is the richest because notes from a course are revised from later,
+# where a meeting summary is mostly read once - a definition given in passing or
+# an aside about what the exam covers is exactly what is worth keeping, and
+# "important_details" on its own was too vague a bucket to catch either.
 SECTION_PLANS: dict[str, list[str]] = {
     "MEETING": ["summary", "decisions", "action_items", "follow_ups"],
-    "LECTURE": ["overview", "key_concepts", "important_details", "homework"],
+    "LECTURE": [
+        "overview",
+        "key_concepts",
+        "definitions",
+        "examples",
+        "important_details",
+        "exam_notes",
+        "open_questions",
+        "homework",
+    ],
     "BRAINSTORM": ["ideas", "most_promising", "next_steps"],
     "INTERVIEW": ["summary", "key_points", "quotes", "follow_ups"],
     "OTHER": ["summary", "key_takeaways", "action_items"],
+}
+
+# What each type looks like, so a seminar full of discussion is not filed as a
+# meeting just because people talked over each other.
+TYPE_CUES: dict[str, str] = {
+    "MEETING": "several people coordinating - decisions taken, work assigned, dates agreed",
+    "LECTURE": "someone teaching or presenting material meant to be learned and revised later",
+    "BRAINSTORM": "ideas being generated and weighed, with nothing settled yet",
+    "INTERVIEW": "one side asking questions, the other answering at length",
+    "OTHER": "anything else, including one person dictating notes to themselves",
 }
 
 ALL_KNOWN_KEYS = {key for plan in SECTION_PLANS.values() for key in plan}
@@ -29,8 +54,9 @@ PLACEHOLDER_PATTERNS = re.compile(
       | (?:no|aucun[e]?|pas\s+de|kein[e]?|sin|ning[uú]n[oa]?)\s+
         (?:key\s+|specific\s+)?
         (?:decisions?|actions?|action\s+items?|items?|takeaways?|follow[\s-]?ups?|homework|
-           notes?|concepts?|ideas?|points?|quotes?|d[eé]cisions?|t[aâ]ches?|
-           id[eé]es?|devoirs?|aufgaben|entscheidungen)
+           notes?|concepts?|ideas?|points?|quotes?|definitions?|examples?|questions?|
+           formulas?|formulae|d[eé]cisions?|t[aâ]ches?|d[eé]finitions?|exemples?|
+           id[eé]es?|devoirs?|formules?|aufgaben|entscheidungen|beispiele?)
         [\s.]*$
       | (?:no|none|aucun[e]?|pas\s+de|kein[e]?|ning[uú]n[oa]?)\b[\w\s'’-]{0,45}?\s*
         (?:identified|mentioned|found|discussed|provided|required|specified|noted|available|
@@ -63,13 +89,16 @@ def _language_clause(language: str) -> str:
 
 
 def build_prompt(transcript: str, language: str) -> str:
+    cues = "\n".join(f"- {kind}: {cue}" for kind, cue in TYPE_CUES.items())
     plans = "\n".join(f"- {kind}: {', '.join(keys)}" for kind, keys in SECTION_PLANS.items())
     return f"""Analyse the transcript below and produce structured notes.
 
 {_language_clause(language)}
 
-Step 1 - classify the transcript as one of: MEETING, LECTURE, BRAINSTORM, INTERVIEW, OTHER.
-Step 2 - use the section keys for that type:
+Step 1 - classify the transcript as one of:
+{cues}
+
+Step 2 - use the section keys for that type, in the order listed:
 {plans}
 
 Return exactly this JSON shape:
@@ -84,7 +113,19 @@ Return exactly this JSON shape:
 Rules:
 - Keep the section KEYS exactly as listed above, in English snake_case. Only the
   bullets, the title and the values in "labels" are in the transcript language.
-- Be specific: keep names, numbers, dates, amounts and percentages.
+- Be specific: keep names, numbers, dates, amounts and percentages. Write
+  technical terms, symbols and formulas exactly as they were said.
+- Write only what the transcript supports. Never add background knowledge, a
+  definition or a conclusion that was not said. Where the transcript reads
+  [inaudible] or is plainly garbled, leave that point out rather than guess at
+  it.
+- Scale the notes to the material: roughly one bullet per 200 to 400 words of
+  transcript, spread over the sections that have content. An hour of teaching
+  should leave someone enough to revise from, not a five-line abstract.
+- Within a section, keep the order in which things came up.
+- In a LECTURE, exam_notes holds only what the speaker actually flagged as
+  assessed, examinable or important to remember, and open_questions only what
+  was left unresolved or deferred. Leave both out if nothing was said.
 - Omit a section entirely when it has no real content. Never emit filler such as
   "No decisions identified".
 - Keep each bullet to one clear idea, with no leading dash or number.

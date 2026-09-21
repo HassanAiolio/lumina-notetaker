@@ -144,6 +144,13 @@ Required in `backend/.env`:
 `.env.example` documents the optional settings: model fallback order, rate limits,
 audio and transcript ceilings, and an email allow-list.
 
+> **Check the model chain occasionally.** Google retires models without much notice, and a
+> retired one answers `404` — which turns the fallback into a second failure instead of a
+> rescue, exactly when the primary is rate-limited. List what your key can actually reach with
+> `curl "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"`, and keep
+> the entries distinct: quota is counted per model, so a second entry only helps if it has its
+> own budget.
+
 ### 3. Frontend
 
 ```bash
@@ -220,6 +227,7 @@ backend/
 ├── languages.py       # supported languages + offline detector
 ├── ratelimit.py       # per-user sliding window
 ├── models.py          # request/response schemas
+├── retranscribe.py    # CLI: transcribe a file from disk, locally or via the API
 └── test_*.py          # unit and API tests
 
 frontend/src/
@@ -267,6 +275,32 @@ Two details make the length limit three hours rather than about forty minutes:
 Between them these replace a pipeline whose peak was roughly 1.2 GB for a one-hour recording —
 enough that an hour-long meeting failed outright, reported as a browser that could not decode
 the audio.
+
+### Transcribing a file you already have
+
+The app only transcribes what it records, so `backend/retranscribe.py` is the way in for a
+file on disk — a recording saved after a failure, a voice memo, anything exported elsewhere.
+It writes plain text, ready to paste into the Text tab.
+
+```bash
+cd backend
+python retranscribe.py lecture.webm --language fr
+```
+
+It has two engines. `--engine local` runs Whisper on your own machine: no API quota, no rate
+limit, and the audio never leaves the laptop, which matters for a long recording — the API
+path costs about one request per four minutes of audio, so three hours is ~45 requests and a
+free-tier key will not survive it. `--engine gemini` uses the same chunking and prompts as the
+app. With no flag it picks local when it is installed.
+
+```bash
+pip install faster-whisper
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12   # NVIDIA GPUs only
+```
+
+The default model is `large-v3-turbo`; `--model large-v3` is more accurate on hard audio and
+several times slower, and `--model small` suits a machine with no usable GPU. Note this is a
+local tool, not something the deployed backend can do — a free Render instance has no GPU.
 
 ### The 3D scene reacts to your voice
 

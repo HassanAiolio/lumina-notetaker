@@ -30,11 +30,19 @@ class Settings:
     GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
     # Tried in order; the first one that answers wins. A quota error or an
     # outage on the primary model silently rolls over to the next.
+    #
+    # Every entry has to be a model the API still serves, and they have to be
+    # genuinely different models: quota is counted per model, so a second entry
+    # is only a fallback if it has its own budget. Google retires models without
+    # much warning and a retired one answers 404, which turns the fallback into
+    # a second failure rather than a rescue - the chain below replaced
+    # gemini-2.0-flash and gemini-2.5-flash-lite after both started 404ing.
+    # Check with: GET /v1beta/models?key=...
     GEMINI_TEXT_MODELS: list[str] = _csv(
-        "GEMINI_TEXT_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+        "GEMINI_TEXT_MODELS", "gemini-3.5-flash,gemini-2.5-flash,gemini-3.1-flash-lite"
     )
     GEMINI_AUDIO_MODELS: list[str] = _csv(
-        "GEMINI_AUDIO_MODELS", "gemini-2.5-flash,gemini-2.0-flash"
+        "GEMINI_AUDIO_MODELS", "gemini-3.5-flash,gemini-2.5-flash,gemini-3.1-flash-lite"
     )
     GEMINI_TIMEOUT: int = _int("GEMINI_TIMEOUT", 120)
     GEMINI_MAX_ATTEMPTS: int = _int("GEMINI_MAX_ATTEMPTS", 3)
