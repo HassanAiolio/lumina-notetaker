@@ -114,8 +114,19 @@ export const transcribeChunk = async ({ blob, language = 'auto', context = '', s
   return response.data;
 };
 
+// Summarizing walks a long transcript window by window, and a rate-limited
+// provider is waited out rather than skipped, so this is the one call that
+// legitimately runs for minutes. The default timeout would cut it off.
+export const SUMMARIZE_TIMEOUT_MS = 10 * 60 * 1000;
+
 export const summarizeTranscript = async (transcript, language = 'auto') =>
-  (await client.post('/notes/summarize', { transcript, language })).data;
+  (
+    await client.post(
+      '/notes/summarize',
+      { transcript, language },
+      { timeout: SUMMARIZE_TIMEOUT_MS },
+    )
+  ).data;
 
 export const saveNote = async (note) => (await client.post('/notes', note)).data;
 

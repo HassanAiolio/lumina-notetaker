@@ -44,8 +44,37 @@ class Settings:
     GEMINI_AUDIO_MODELS: list[str] = _csv(
         "GEMINI_AUDIO_MODELS", "gemini-3.5-flash,gemini-2.5-flash,gemini-3.1-flash-lite"
     )
+    # Gemini could take a whole transcript in one request - its context is
+    # huge - but a model asked to summarize an hour in one pass covers the
+    # ends and thins out in the middle. Windowing it too is a quality choice,
+    # not a limit: on a 78 minute lecture it is the difference between 56
+    # bullets and 100+. Wider than Groq's because nothing here forces it down.
+    GEMINI_WINDOW_CHARS: int = _int("GEMINI_WINDOW_CHARS", 24_000)
     GEMINI_TIMEOUT: int = _int("GEMINI_TIMEOUT", 120)
     GEMINI_MAX_ATTEMPTS: int = _int("GEMINI_MAX_ATTEMPTS", 3)
+
+    # ── Groq (second provider) ────────────────────────────────────────────
+    # Tried once every Gemini model has failed. A separate provider is what
+    # makes the fallback chain worth having: a Gemini quota error takes out
+    # every Gemini model at once, so the only useful next step is elsewhere.
+    GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+    GROQ_TEXT_MODELS: list[str] = _csv(
+        "GROQ_TEXT_MODELS", "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b"
+    )
+    # Groq runs Whisper as a dedicated endpoint rather than a prompted model.
+    GROQ_AUDIO_MODELS: list[str] = _csv(
+        "GROQ_AUDIO_MODELS", "whisper-large-v3,whisper-large-v3-turbo"
+    )
+    # A long transcript will not fit one Groq request on the free tier (a few
+    # thousand tokens), so it is summarized in windows and merged. French runs
+    # about 3.5 characters per token, leaving room for the prompt and the reply.
+    GROQ_WINDOW_CHARS: int = _int("GROQ_WINDOW_CHARS", 18_000)
+    GROQ_TIMEOUT: int = _int("GROQ_TIMEOUT", 120)
+    # Four, not two: a token-per-minute refusal clears on its own, and the
+    # service says when. Waiting it out turns a missing stretch of the notes
+    # into a slower summary, which is the better trade.
+    GROQ_MAX_ATTEMPTS: int = _int("GROQ_MAX_ATTEMPTS", 4)
+    GROQ_MAX_RETRY_WAIT: int = _int("GROQ_MAX_RETRY_WAIT", 35)
 
     # ── Auth ──────────────────────────────────────────────────────────────
     GOOGLE_CLIENT_ID: str = os.environ.get("GOOGLE_CLIENT_ID", "")
@@ -72,6 +101,10 @@ class Settings:
     # Audio longer than this in a single request is split before transcription.
     AUDIO_CHUNK_SECONDS: int = _int("AUDIO_CHUNK_SECONDS", 240)
     MAX_NOTES_PAGE: int = _int("MAX_NOTES_PAGE", 100)
+    # A window refused as too large is halved and retried, down to this floor.
+    # Below it the problem is not the size, and splitting further only makes
+    # the notes choppier.
+    MIN_WINDOW_CHARS: int = _int("MIN_WINDOW_CHARS", 2_500)
 
     # Per-user sliding-window rate limits: (requests, window_seconds)
     RATE_LIMIT_AI: tuple[int, int] = (_int("RATE_LIMIT_AI_REQUESTS", 30), _int("RATE_LIMIT_AI_WINDOW", 60))
@@ -88,8 +121,12 @@ class Settings:
         return bool(self.GOOGLE_CLIENT_ID)
 
     @property
+    def groq_configured(self) -> bool:
+        return bool(self.GROQ_API_KEY)
+
+    @property
     def ai_configured(self) -> bool:
-        return bool(self.GEMINI_API_KEY)
+        return bool(self.GEMINI_API_KEY or self.GROQ_API_KEY)
 
 
 settings = Settings()

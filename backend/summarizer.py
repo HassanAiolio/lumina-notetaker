@@ -1,8 +1,11 @@
 """Turn a raw transcript into structured notes, in the transcript's own language."""
 import logging
 import re
+from collections import deque
 
+import groq
 import languages
+from config import settings
 from gemini import GeminiError, generate, parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -129,6 +132,10 @@ Rules:
 - Omit a section entirely when it has no real content. Never emit filler such as
   "No decisions identified".
 - Keep each bullet to one clear idea, with no leading dash or number.
+- When a bullet explains a term, a concept or a named thing, open with that name
+  in **bold** and follow it with the explanation. Use bold only for that, never
+  for a whole sentence: it is what makes a long set of notes scannable, and it
+  stops working the moment half the page is bold. No other formatting.
 - If the transcript is too short or unintelligible, still return valid JSON with
   whatever can honestly be extracted.
 
@@ -136,6 +143,91 @@ Transcript:
 {TRIPLE_QUOTE}
 {transcript}
 {TRIPLE_QUOTE}"""
+
+
+def split_for_window(transcript: str, window_chars: int) -> list[str]:
+    """Cut a transcript into windows that fit a provider's request budget.
+
+    Groq's free tier caps a single request at a few thousand tokens, which an
+    hour of speech blows past in one go - it answers 413 and no amount of
+    retrying helps. Splitting on sentence boundaries keeps each window readable
+    on its own, so the model is summarizing prose rather than a fragment that
+    starts mid-clause.
+    """
+    if len(transcript) <= window_chars:
+        return [transcript]
+
+    sentences = re.split(r"(?<=[.!?])\s+", transcript)
+    windows: list[str] = []
+    current = ""
+    for sentence in sentences:
+        if current and len(current) + len(sentence) + 1 > window_chars:
+            windows.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        windows.append(current)
+    return windows
+
+
+def merge_results(results: list[dict]) -> dict:
+    """Fold per-window notes into one set, keeping order and dropping repeats.
+
+    Windows are consecutive slices of one recording, so their bullets simply
+    concatenate. What needs care is the duplication where a point spans a
+    boundary and both windows report it.
+    """
+    usable = [r for r in results if r.get("sections")]
+    if not usable:
+        return {}
+    if len(usable) == 1:
+        return usable[0]
+
+    sections: dict[str, list[str]] = {}
+    labels: dict[str, str] = {}
+    seen: set[str] = set()
+
+    for result in usable:
+        for key, bullets in result["sections"].items():
+            for bullet in bullets:
+                fingerprint = re.sub(r"\W+", "", bullet.lower())[:80]
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                sections.setdefault(key, []).append(bullet)
+            # Only a real label claims the key. setdefault on a missing one
+            # would store "" and lock out the window that did name the section.
+            label = result.get("labels", {}).get(key, "")
+            if label and key not in labels:
+                labels[key] = label
+
+    types = [r["type"] for r in usable if r.get("type")]
+    languages_seen = [r["language"] for r in usable if r.get("language") != languages.AUTO]
+    content_type = max(set(types), key=types.count) if types else "OTHER"
+
+    # Back into the plan's reading order. Merging follows whichever window
+    # mentioned a section first, so an aside about the exam in window one would
+    # otherwise push exam_notes above the overview.
+    plan = SECTION_PLANS.get(content_type, [])
+    ordered = sorted(sections, key=lambda key: (plan.index(key) if key in plan else len(plan), key))
+
+    return {
+        "title": usable[0]["title"],
+        "type": content_type,
+        "language": languages_seen[0] if languages_seen else languages.AUTO,
+        "sections": {key: sections[key] for key in ordered},
+        "labels": {k: v for k, v in labels.items() if v},
+    }
+
+
+# A leading list marker the model added despite being told not to.
+#
+# The asterisk needs care: "* " starts a list, but "**" starts bold, and a
+# pattern of [-*•] strips one star off "**Terme** : ..." and leaves a stray "*"
+# to render as a literal asterisk. So a single asterisk only counts as a marker
+# when whitespace follows it.
+_LIST_MARKER = re.compile(r"^\s*(?:[-•]\s*|\*(?!\*)\s+|\d+[.)]\s*)")
 
 
 def _clean_bullets(raw: object) -> list[str]:
@@ -155,7 +247,7 @@ def _clean_bullets(raw: object) -> list[str]:
             )
         if not isinstance(item, str):
             continue
-        text = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", item).strip()
+        text = _LIST_MARKER.sub("", item).strip()
         if not text or PLACEHOLDER_PATTERNS.match(text):
             continue
         key = text.lower()
@@ -300,42 +392,156 @@ def fallback_summary(transcript: str, requested_language: str) -> dict:
 
 # -- Entry point --------------------------------------------------------------
 
-async def summarize(transcript: str, language: str = languages.AUTO) -> dict:
-    """Structured notes for `transcript`.
+def _is_too_large(exc: Exception) -> bool:
+    """Did the provider refuse this window for its size rather than fail?"""
+    if getattr(exc, "status_code", None) in (413,):
+        return True
+    message = str(exc).lower()
+    return "too large" in message or "exceeds" in message or "context length" in message
 
-    Always returns a usable result: if Gemini is unreachable or unparseable we
-    fall back to a local extraction and flag the result as degraded.
+
+async def summarize_in_windows(
+    transcript: str,
+    language: str,
+    *,
+    call,
+    window_chars: int,
+    min_window_chars: int,
+) -> tuple[dict, int, int, Exception | None]:
+    """Summarize window by window. Returns (merged, failed, total, last_error).
+
+    Every transcript long enough to need it goes through this, whichever
+    provider is answering, for two separate reasons.
+
+    The hard one is size: Groq's free tier refuses a request over a few
+    thousand tokens outright. The soft one matters more often - a model asked
+    to summarize an hour in one pass covers the start and the end and thins out
+    in the middle. Summarizing each stretch on its own and merging keeps the
+    detail even where the transcript is long, which is why this is not reserved
+    for the provider that forces it.
+
+    A window refused for its size is halved and requeued rather than written
+    off, so the configured size is a starting guess: a language that packs more
+    tokens into the same characters settles on a smaller window by itself.
+    A window that fails any other way is counted and skipped, because losing
+    one stretch beats discarding the rest.
+    """
+    pending = deque(split_for_window(transcript, window_chars))
+    if len(pending) > 1:
+        logger.info("Transcript split into %d windows", len(pending))
+
+    parts: list[dict] = []
+    failed = 0
+    total = 0
+    last_error: Exception | None = None
+    # Halving is bounded by the floor, but cap the work anyway so a provider
+    # that refuses everything cannot spin.
+    budget = 4 * len(pending) + 8
+
+    while pending and budget > 0:
+        budget -= 1
+        window = pending.popleft()
+        total += 1
+        try:
+            answer = await call(build_prompt(window, language))
+        except (GeminiError, groq.GroqError) as exc:
+            halves = (
+                split_for_window(window, max(len(window) // 2, min_window_chars))
+                if _is_too_large(exc)
+                else [window]
+            )
+            if len(halves) > 1:
+                logger.info("Window of %d chars refused as too large; halving", len(window))
+                total -= 1  # not yet attempted at this size
+                pending.extendleft(reversed(halves))
+                continue
+            failed += 1
+            last_error = exc
+            logger.warning("Window failed, continuing without it: %s", exc)
+            continue
+
+        parsed = parse_json_object(answer)
+        if not parsed:
+            failed += 1
+            logger.warning("Window produced unparseable output, skipping it")
+            continue
+        parts.append(
+            normalize_result(parsed, requested_language=language, transcript=window)
+        )
+
+    return merge_results(parts), failed, total, last_error
+
+
+async def summarize(transcript: str, language: str = languages.AUTO) -> dict:
+    """Structured notes for `transcript`, at any length.
+
+    Both providers summarize in windows and merge, so the detail does not thin
+    out in the middle of a long recording. Gemini is primary; Groq is tried
+    when every Gemini model has failed, since a quota error takes all of them
+    out at once. Local extraction remains the last resort, and says so.
     """
     language = languages.normalize(language)
-    prompt = build_prompt(transcript, language)
 
-    try:
-        raw = await generate(
+    async def with_gemini(prompt: str) -> str:
+        return await generate(
             [{"text": prompt}],
             json_output=True,
             system_instruction=SYSTEM_INSTRUCTION,
             temperature=0.25,
         )
-    except GeminiError as exc:
-        logger.error("Summarization fell back to local extraction: %s", exc)
-        result = fallback_summary(transcript, language)
-        result["degraded_reason"] = "quota" if exc.quota else "unavailable"
-        return result
 
-    parsed = parse_json_object(raw)
-    if not parsed:
-        logger.error("Summarization produced unparseable output, using local extraction")
-        result = fallback_summary(transcript, language)
-        result["degraded_reason"] = "unparseable"
-        return result
+    async def with_groq(prompt: str) -> str:
+        return await groq.generate(
+            prompt,
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.25,
+            json_output=True,
+        )
 
-    result = normalize_result(parsed, requested_language=language, transcript=transcript)
-    if not result["sections"]:
-        logger.warning("Model returned no usable sections, using local extraction")
-        fallback = fallback_summary(transcript, language)
-        fallback["title"] = result["title"] or fallback["title"]
-        fallback["degraded_reason"] = "empty"
-        return fallback
+    providers = [("gemini", with_gemini, settings.GEMINI_WINDOW_CHARS)]
+    if settings.groq_configured:
+        providers.append(("groq", with_groq, settings.GROQ_WINDOW_CHARS))
 
-    result["degraded"] = False
+    last_error: Exception | None = None
+    best: dict = {}
+    best_failed = 0
+
+    for name, call, window_chars in providers:
+        try:
+            merged, failed, total, window_error = await summarize_in_windows(
+                transcript,
+                language,
+                call=call,
+                window_chars=window_chars,
+                min_window_chars=settings.MIN_WINDOW_CHARS,
+            )
+        except (GeminiError, groq.GroqError) as exc:
+            last_error = exc
+            logger.warning("%s could not summarize: %s", name, exc)
+            continue
+
+        # Kept even though the loop swallows per-window failures: without it
+        # a provider that failed on every window would look merely empty,
+        # and the notes would say "unavailable" for what was really a quota.
+        last_error = window_error or last_error
+
+        if merged and not failed:
+            merged["degraded"] = False
+            return merged
+
+        if merged and len(merged.get("sections", {})) > len(best.get("sections", {})):
+            best, best_failed = merged, failed
+        if failed:
+            logger.warning("%s summarized %d of %d windows", name, total - failed, total)
+
+    if best:
+        # Gaps, but real notes. Far better than the local extraction, and
+        # flagged so nobody mistakes them for complete.
+        best["degraded"] = True
+        best["degraded_reason"] = "partial"
+        return best
+
+    logger.error("Every provider failed, using local extraction: %s", last_error)
+    result = fallback_summary(transcript, language)
+    result["degraded_reason"] = "quota" if getattr(last_error, "quota", False) else "unavailable"
     return result

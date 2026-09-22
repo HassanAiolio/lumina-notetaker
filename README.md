@@ -144,6 +144,39 @@ Required in `backend/.env`:
 `.env.example` documents the optional settings: model fallback order, rate limits,
 audio and transcript ceilings, and an email allow-list.
 
+### Two providers
+
+Gemini is primary; **Groq is tried when every Gemini model has failed**, and only then. That
+matters because a Gemini quota error takes out all Gemini models at once — the fallback chain
+within one provider is no help — so the honest next step is somewhere else entirely. Local
+extraction stays as the last resort, but it produces visibly worse notes and says so in the UI.
+
+Groq covers both jobs: chat models for the notes, and Whisper for speech, which also gives the
+transcription path a way out when Gemini's audio quota runs dry. Set `GROQ_API_KEY` (free from
+[console.groq.com](https://console.groq.com/keys)) and it switches itself on.
+
+### Detail that does not thin out
+
+Long transcripts are summarized **window by window and merged, whichever provider answers**.
+
+Groq's free tier forces it — it refuses any single request over a few thousand tokens, and an
+hour of speech is well past that. Gemini does not force it: its context easily swallows a whole
+lecture. It is windowed anyway, because a model asked to summarize an hour in one pass covers
+the start and the end and thins out in the middle. On the same 78-minute lecture:
+
+| | one pass | windowed |
+|---|---|---|
+| Gemini | 56 bullets, 6 sections | **104 bullets, 8 sections** |
+| Groq | refused (413) | **103 bullets, 8 sections** |
+
+Two things keep it honest at any length. A window refused for its size is **halved and
+requeued**, so `*_WINDOW_CHARS` is a starting guess rather than a hard assumption — a language
+that packs more tokens into the same characters settles on a smaller window by itself, down to
+`MIN_WINDOW_CHARS`. A window that fails any other way is **counted and skipped**: losing one
+stretch beats discarding the rest, and the note is flagged `partial` so nobody mistakes it for
+complete. Rate limits are waited out rather than skipped, using the delay the service
+advertises, which is why `summarizeTranscript` has its own ten-minute client timeout.
+
 > **Check the model chain occasionally.** Google retires models without much notice, and a
 > retired one answers `404` — which turns the fallback into a second failure instead of a
 > rescue, exactly when the primary is rate-limited. List what your key can actually reach with

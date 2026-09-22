@@ -102,3 +102,51 @@ export const downloadMarkdown = (note) => {
   // Revoking immediately can cancel the download in Safari.
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 };
+
+/**
+ * Split a bullet into runs of plain, bold, italic and code text.
+ *
+ * Models write inline Markdown whether or not they were asked to - a stray
+ * **like this** rendered as literal asterisks, which looked like a bug because
+ * it was one. Parsing it means emphasis either renders properly or, for a
+ * pattern we do not handle, survives as the characters that were written.
+ *
+ * Deliberately tiny: bullets are one sentence, so there is no block structure
+ * to parse and no reason to pull in a Markdown library for it.
+ */
+const INLINE_PATTERN = /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|(?<![*\w])\*[^*\n]+\*(?!\w)|(?<![_\w])_[^_\n]+_(?!\w))/g;
+
+export const inlineRuns = (text) => {
+  const source = typeof text === 'string' ? text : '';
+  if (!source) return [];
+
+  const runs = [];
+  let index = 0;
+
+  source.split(INLINE_PATTERN).forEach((piece) => {
+    if (!piece) return;
+    index += 1;
+    if (piece.startsWith('**') && piece.endsWith('**')) {
+      runs.push({ key: index, text: piece.slice(2, -2), bold: true });
+    } else if (piece.startsWith('__') && piece.endsWith('__')) {
+      runs.push({ key: index, text: piece.slice(2, -2), bold: true });
+    } else if (piece.startsWith('`') && piece.endsWith('`')) {
+      runs.push({ key: index, text: piece.slice(1, -1), code: true });
+    } else if (
+      (piece.startsWith('*') && piece.endsWith('*')) ||
+      (piece.startsWith('_') && piece.endsWith('_'))
+    ) {
+      runs.push({ key: index, text: piece.slice(1, -1), italic: true });
+    } else {
+      runs.push({ key: index, text: piece });
+    }
+  });
+
+  return runs;
+};
+
+/** The same text with its formatting removed, for previews and plain contexts. */
+export const stripInline = (text) =>
+  inlineRuns(text)
+    .map((run) => run.text)
+    .join('');

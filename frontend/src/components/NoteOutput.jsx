@@ -3,14 +3,16 @@ import { motion } from 'framer-motion';
 import { Check, ChevronDown, Copy, Plus, TriangleAlert, X } from 'lucide-react';
 import { ExportButton } from './ExportButton';
 import { Input } from './ui/input';
-import { languageName, noteToMarkdown, sectionEntries, sectionLabel } from '../lib/notes';
+import {
+  inlineRuns, languageName, noteToMarkdown, sectionEntries, sectionLabel, stripInline,
+} from '../lib/notes';
 
 const Section = ({ sectionKey, label, items, copied, onCopy }) => (
   <div className="space-y-2">
     <div className="flex items-center justify-between gap-3">
       <h4 className="text-xs text-zinc-400 uppercase tracking-widest font-medium">{label}</h4>
       <button
-        onClick={() => onCopy(items.join('\n'), sectionKey)}
+        onClick={() => onCopy(items.map(stripInline).join('\n'), sectionKey)}
         className="tap text-zinc-400 hover:text-white transition-colors duration-200"
         aria-label={`Copy ${label}`}
         data-testid={`copy-${sectionKey}`}
@@ -28,7 +30,26 @@ const Section = ({ sectionKey, label, items, copied, onCopy }) => (
           className="text-sm text-zinc-300 leading-relaxed flex items-start gap-2"
         >
           <span className="mt-[7px] w-1 h-1 rounded-full bg-zinc-600 flex-shrink-0" />
-          <span>{item}</span>
+          <span>
+            {inlineRuns(item).map((run) =>
+              run.bold ? (
+                <strong key={run.key} className="font-semibold text-zinc-100">
+                  {run.text}
+                </strong>
+              ) : run.code ? (
+                <code
+                  key={run.key}
+                  className="px-1 py-0.5 rounded bg-white/5 text-violet-200 text-[0.85em] font-mono"
+                >
+                  {run.text}
+                </code>
+              ) : run.italic ? (
+                <em key={run.key}>{run.text}</em>
+              ) : (
+                <React.Fragment key={run.key}>{run.text}</React.Fragment>
+              ),
+            )}
+          </span>
         </motion.li>
       ))}
     </ul>
@@ -109,9 +130,11 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
         >
           <TriangleAlert size={14} className="flex-shrink-0 mt-px" />
           <span className="leading-relaxed">
-            {note.degraded_reason === 'quota'
-              ? 'The AI is out of quota right now, so these notes were structured locally. Your transcript is intact — regenerate later for a proper summary.'
-              : 'The AI was unreachable, so these notes were structured locally. Your transcript is intact — regenerate later for a proper summary.'}
+            {note.degraded_reason === 'partial'
+              ? 'Part of the recording could not be summarized before the AI hit its limit, so a stretch of it is missing from these notes. Your transcript is intact — regenerate later for the full set.'
+              : note.degraded_reason === 'quota'
+                ? 'The AI is out of quota right now, so these notes were structured locally. Your transcript is intact — regenerate later for a proper summary.'
+                : 'The AI was unreachable, so these notes were structured locally. Your transcript is intact — regenerate later for a proper summary.'}
           </span>
         </div>
       )}

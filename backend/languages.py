@@ -24,15 +24,32 @@ LANGUAGES: dict[str, tuple[str, str, str]] = {
 AUTO = "auto"
 
 
+# Both spellings of every language we know, so a provider that reports a name
+# instead of a code still lands on the right one.
+_BY_NAME: dict[str, str] = {
+    name.lower(): code
+    for code, names in LANGUAGES.items()
+    for name in names
+}
+
+
 def normalize(code: str | None) -> str:
-    """Map anything the client sends onto a code we know, or 'auto'."""
+    """Map anything a client or a model reports onto a code we know, or 'auto'.
+
+    Not every source speaks BCP-47. Whisper reports a language by its English
+    name ("french"), and a chat model asked for a code will sometimes answer
+    with the name anyway, so both spellings are accepted - otherwise a
+    perfectly good detection is thrown away and the text has to be sniffed.
+    """
     if not code:
         return AUTO
     code = code.strip().lower().replace("_", "-")
     if code in (AUTO, ""):
         return AUTO
     base = code.split("-")[0]
-    return base if base in LANGUAGES else AUTO
+    if base in LANGUAGES:
+        return base
+    return _BY_NAME.get(code, AUTO)
 
 
 def english_name(code: str) -> str:

@@ -4,6 +4,7 @@ import logging
 import re
 import wave
 
+import groq
 import languages
 from config import settings
 from gemini import GeminiError, generate, parse_json_object
@@ -139,6 +140,36 @@ Reply with JSON only:
 {{"text": "the transcription", "language": "BCP-47 code, e.g. fr"}}"""
 
 
+async def _transcribe_one_groq(
+    data: bytes, mime_type: str, language: str, context: str
+) -> tuple[str, str]:
+    """Whisper on Groq, for when every Gemini model has failed.
+
+    This is a dedicated transcription endpoint, not a prompted chat model, so
+    the careful instructions in _prompt do not apply. What it does take is a
+    short vocabulary hint, and the tail of the previous chunk is exactly that:
+    it keeps names and spellings consistent across a chunk boundary the same
+    way the Gemini path's context does.
+    """
+    extension = {"audio/wav": "wav", "audio/mp3": "mp3", "audio/ogg": "ogg",
+                 "audio/flac": "flac", "audio/aac": "m4a", "audio/aiff": "aiff"}
+    result = await groq.transcribe(
+        data,
+        filename=f"chunk.{extension.get(mime_type, 'wav')}",
+        language=None if language == languages.AUTO else language,
+        prompt=context[-400:],
+    )
+
+    text = result["text"].strip()
+    if _NO_SPEECH.match(text):
+        text = ""
+
+    detected = languages.normalize(result["language"])
+    if detected == languages.AUTO and text:
+        detected = languages.detect(text)
+    return text, detected
+
+
 async def _transcribe_one(
     data: bytes, mime_type: str, language: str, context: str
 ) -> tuple[str, str]:
@@ -204,17 +235,36 @@ async def transcribe(
     pieces: list[str] = []
     detected_language = languages.AUTO
     running_context = context
+    # Sticky: once Gemini has exhausted every model, stop asking it again.
+    use_groq = False
 
     for index, chunk in enumerate(chunks):
+        # Once we know the language, pin it so later chunks agree.
+        chunk_lang = detected_language if detected_language != languages.AUTO else language
         try:
-            text, chunk_language = await _transcribe_one(
-                chunk,
-                resolved_mime,
-                # Once we know the language, pin it so later chunks agree.
-                detected_language if detected_language != languages.AUTO else language,
-                running_context,
-            )
-        except GeminiError as exc:
+            if not use_groq:
+                try:
+                    text, chunk_language = await _transcribe_one(
+                        chunk, resolved_mime, chunk_lang, running_context,
+                    )
+                except GeminiError as gemini_error:
+                    if not settings.groq_configured:
+                        raise
+                    # Getting here means every Gemini model and attempt just
+                    # failed. That does not come back mid-recording, and an
+                    # hour of audio is fifteen more chunks that would each pay
+                    # the whole timeout and retry cost again before giving up.
+                    logger.warning(
+                        "Gemini unavailable at chunk %d (%s); using Groq Whisper "
+                        "for the rest of this recording", index + 1, gemini_error,
+                    )
+                    use_groq = True
+
+            if use_groq:
+                text, chunk_language = await _transcribe_one_groq(
+                    chunk, resolved_mime, chunk_lang, running_context,
+                )
+        except (GeminiError, groq.GroqError) as exc:
             if not pieces:
                 raise
             # Partial audio is better than none: keep what we have and say so.

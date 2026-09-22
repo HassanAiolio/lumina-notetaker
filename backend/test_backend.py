@@ -22,6 +22,7 @@ async def _no_sleep(*_a, **_k):
     return None
 
 import gemini  # noqa: E402
+import groq  # noqa: E402
 import languages  # noqa: E402
 import ratelimit  # noqa: E402
 import retranscribe  # noqa: E402
@@ -403,3 +404,247 @@ async def test_split_wav_trusts_caller_supplied_header():
     assert transcription.split_wav(data, 240, info) == [data]
     # and still works when it has to read the header itself
     assert transcription.split_wav(data, 240) == [data]
+
+
+# -- groq: second provider ------------------------------------------------------
+
+def test_split_for_window_keeps_short_transcripts_whole():
+    assert summarizer.split_for_window("One. Two. Three.", 18_000) == ["One. Two. Three."]
+
+
+def test_split_for_window_cuts_on_sentence_boundaries_within_budget():
+    transcript = " ".join(f"Phrase numero {i}." for i in range(400))
+    windows = summarizer.split_for_window(transcript, 1_000)
+
+    assert len(windows) > 1
+    assert all(len(w) <= 1_000 for w in windows)
+    # Nothing dropped, and no sentence cut in half.
+    assert "".join(w.replace(" ", "") for w in windows) == transcript.replace(" ", "")
+    assert all(w.endswith(".") for w in windows)
+
+
+def test_merge_results_concatenates_windows_and_drops_repeats():
+    merged = summarizer.merge_results([
+        {"title": "Cours", "type": "LECTURE", "language": "fr",
+         "sections": {"overview": ["Un point"], "key_concepts": ["Concept A"]},
+         "labels": {"overview": "Vue d'ensemble"}},
+        {"title": "Autre", "type": "LECTURE", "language": "fr",
+         # "Un point." repeats across the boundary; punctuation must not hide it.
+         "sections": {"overview": ["Un point."], "key_concepts": ["Concept B"]},
+         "labels": {"key_concepts": "Concepts"}},
+    ])
+
+    assert merged["sections"]["overview"] == ["Un point"]
+    assert merged["sections"]["key_concepts"] == ["Concept A", "Concept B"]
+    assert merged["title"] == "Cours"          # the first window names the notes
+    assert merged["type"] == "LECTURE"
+    assert merged["labels"]["overview"] == "Vue d'ensemble"
+    assert merged["labels"]["key_concepts"] == "Concepts"
+
+
+def test_merge_results_ignores_windows_that_produced_nothing():
+    merged = summarizer.merge_results([
+        {"title": "T", "type": "OTHER", "language": "fr", "sections": {}, "labels": {}},
+        {"title": "Real", "type": "LECTURE", "language": "fr",
+         "sections": {"overview": ["Something"]}, "labels": {}},
+    ])
+    assert merged["title"] == "Real"
+    assert merged["sections"] == {"overview": ["Something"]}
+
+
+def test_merge_results_of_nothing_is_empty():
+    assert summarizer.merge_results([]) == {}
+    assert summarizer.merge_results([{"sections": {}}]) == {}
+
+
+def test_language_normalize_accepts_the_names_providers_report():
+    # Groq's Whisper answers "french", not "fr"; a chat model sometimes does too.
+    assert languages.normalize("french") == "fr"
+    assert languages.normalize("English") == "en"
+    assert languages.normalize("Deutsch") == "de"
+    assert languages.normalize("fr-FR") == "fr"
+    assert languages.normalize("not a language") == languages.AUTO
+    assert languages.normalize(None) == languages.AUTO
+
+
+async def test_groq_generate_asks_for_json_and_carries_the_system_prompt(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": '{"title":"T"}'}, "finish_reason": "stop"}]})
+
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(groq, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    out = await groq.generate("Return JSON please", models=["m"], system_instruction="be terse")
+
+    assert out == '{"title":"T"}'
+    assert seen["response_format"] == {"type": "json_object"}
+    assert seen["messages"][0] == {"role": "system", "content": "be terse"}
+    assert seen["messages"][1]["content"] == "Return JSON please"
+
+
+async def test_groq_walks_to_the_next_model_on_a_size_refusal(monkeypatch):
+    # 413 means this request will never fit that model, so retrying it is
+    # pointless - but another model has its own budget.
+    tried = []
+
+    def handler(request):
+        model = json.loads(request.content)["model"]
+        tried.append(model)
+        if model == "small":
+            return httpx.Response(413, json={"error": {"message": "too large"}})
+        return httpx.Response(200, json={"choices": [
+            {"message": {"content": "{}"}, "finish_reason": "stop"}]})
+
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(groq.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(groq, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    await groq.generate("p", models=["small", "big"])
+    assert tried == ["small", "big"]  # one attempt at the first, not GROQ_MAX_ATTEMPTS
+
+
+async def test_groq_transcribe_reports_text_and_language(monkeypatch):
+    def handler(request):
+        assert b"verbose_json" in request.content  # the plain format omits language
+        return httpx.Response(200, json={"text": " Bonjour ", "language": "french"})
+
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(groq, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    result = await groq.transcribe(b"RIFFfake", models=["whisper"], language="fr")
+    assert result == {"text": "Bonjour", "language": "french"}
+
+
+# -- the fallback path under failure --------------------------------------------
+# All of this only runs when something is already broken, so it needs tests more
+# than the happy path does.
+
+NOTES_JSON = '{"title":"T","type":"LECTURE","language":"fr","sections":{"overview":["%s"]},"labels":{}}'
+
+
+def _long_transcript(windows=3):
+    return " ".join(f"Phrase de remplissage numero {i}." for i in range(windows * 700))
+
+
+async def _gemini_is_down(*_a, **_k):
+    raise gemini.GeminiError("forced outage", quota=True)
+
+
+async def test_groq_salvages_the_windows_that_worked(monkeypatch):
+    # Losing one window is a gap; throwing away the rest to return a local
+    # extraction instead would be worse.
+    calls = {"n": 0}
+
+    async def flaky(prompt, **_k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise groq.GroqError("rate limited", status_code=429, quota=True)
+        return NOTES_JSON % f"Point {calls['n']}"
+
+    monkeypatch.setattr(summarizer, "generate", _gemini_is_down)
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "k")
+    monkeypatch.setattr(summarizer.settings, "GROQ_WINDOW_CHARS", 8_000)
+    monkeypatch.setattr(groq, "generate", flaky)
+
+    result = await summarizer.summarize(_long_transcript(), "fr")
+
+    assert result["sections"]["overview"]          # kept what succeeded
+    assert result["degraded"] is True              # but says it is incomplete
+    assert result["degraded_reason"] == "partial"
+    assert "Point 1" in result["sections"]["overview"]
+
+
+async def test_a_window_refused_as_too_large_is_halved_not_dropped(monkeypatch):
+    # 413 is about this window's size, so retrying it unchanged is pointless -
+    # but the passage is not lost either.
+    seen: list[int] = []
+
+    async def picky(prompt, **_k):
+        # The prompt carries scaffolding too; the window is what varies.
+        seen.append(len(prompt))
+        if len(prompt) > 9_000:
+            raise groq.GroqError("too large", status_code=413)
+        return NOTES_JSON % "Rescued"
+
+    monkeypatch.setattr(summarizer, "generate", _gemini_is_down)
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "k")
+    monkeypatch.setattr(summarizer.settings, "GROQ_WINDOW_CHARS", 40_000)
+    monkeypatch.setattr(groq, "generate", picky)
+
+    result = await summarizer.summarize(_long_transcript(), "fr")
+
+    assert result["sections"]["overview"] == ["Rescued"]
+    assert result["degraded"] is False             # nothing was actually lost
+    assert max(seen) > 9_000 and min(seen) <= 9_000  # it really did shrink
+
+
+async def test_halving_stops_at_the_floor_instead_of_spinning(monkeypatch):
+    async def always_too_large(prompt, **_k):
+        raise groq.GroqError("too large", status_code=413)
+
+    monkeypatch.setattr(summarizer, "generate", _gemini_is_down)
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "k")
+    monkeypatch.setattr(summarizer.settings, "GROQ_WINDOW_CHARS", 20_000)
+    monkeypatch.setattr(summarizer.settings, "MIN_WINDOW_CHARS", 2_500)
+    monkeypatch.setattr(groq, "generate", always_too_large)
+
+    result = await summarizer.summarize(_long_transcript(), "fr")
+
+    # Gives up and hands back the local extraction rather than looping forever.
+    assert result["degraded"] is True
+    assert result["degraded_reason"] in {"quota", "unavailable"}
+
+
+async def test_groq_is_skipped_entirely_when_no_key_is_set(monkeypatch):
+    called = {"groq": False}
+
+    async def should_not_run(*_a, **_k):
+        called["groq"] = True
+        return NOTES_JSON % "nope"
+
+    monkeypatch.setattr(summarizer, "generate", _gemini_is_down)
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "")
+    monkeypatch.setattr(groq, "generate", should_not_run)
+
+    result = await summarizer.summarize("Court transcript. Deux phrases.", "fr")
+
+    assert called["groq"] is False
+    assert result["degraded"] is True
+    assert result["degraded_reason"] == "quota"
+
+
+async def test_merge_puts_sections_back_in_the_plan_order():
+    # Window one mentioned the exam in passing; that must not outrank the overview.
+    merged = summarizer.merge_results([
+        {"title": "T", "type": "LECTURE", "language": "fr",
+         "sections": {"exam_notes": ["A"], "homework": ["B"]}, "labels": {}},
+        {"title": "T", "type": "LECTURE", "language": "fr",
+         "sections": {"overview": ["C"], "key_concepts": ["D"]}, "labels": {}},
+    ])
+    plan = summarizer.SECTION_PLANS["LECTURE"]
+    order = [plan.index(k) for k in merged["sections"]]
+    assert order == sorted(order)
+    assert list(merged["sections"])[0] == "overview"
+
+
+def test_bullet_cleanup_keeps_bold_but_drops_list_markers():
+    # The bug this pins down: a [-*] marker pattern eats one star off "**Terme**"
+    # and leaves a stray asterisk to render literally in the notes.
+    cleaned = summarizer._clean_bullets([
+        "**Chaine de pensee** : une strategie de prompt",
+        "- un vrai tiret",
+        "* une vraie puce",
+        "1. un vrai numero",
+        "**Gras** en tete et *italique* au milieu",
+    ])
+    assert cleaned == [
+        "**Chaine de pensee** : une strategie de prompt",
+        "un vrai tiret",
+        "une vraie puce",
+        "un vrai numero",
+        "**Gras** en tete et *italique* au milieu",
+    ]
