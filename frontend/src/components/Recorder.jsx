@@ -228,8 +228,13 @@ export const Recorder = ({
 
     // A long recording is several files. Browsers throttle downloads fired in
     // the same tick, so they are spaced out instead of issued all at once.
+    // Zero-padded: "part10" sorts before "part2" everywhere that orders names
+    // as text, which is every file manager and most scripts. Getting this wrong
+    // silently reassembles the recording in the wrong order.
+    const width = String(segments.length).length;
     segments.forEach((segment, index) => {
-      const suffix = segments.length > 1 ? `-part${index + 1}` : '';
+      const suffix =
+        segments.length > 1 ? `-part${String(index + 1).padStart(width, '0')}` : '';
       setTimeout(() => {
         const url = URL.createObjectURL(segment);
         const link = document.createElement('a');

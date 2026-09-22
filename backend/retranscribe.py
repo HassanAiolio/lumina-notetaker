@@ -16,6 +16,7 @@ elsewhere - has no way in. This is that way in, with two engines:
     python retranscribe.py lecture.webm                       # local if available
     python retranscribe.py lecture.webm --engine local --language fr
     python retranscribe.py short-memo.m4a --engine gemini
+    python retranscribe.py "long lecture/"                    # joins every part in order
 
 The result is plain text, ready to paste into the app's Text tab for notes.
 Needs ffmpeg either way. For the local engine:
@@ -25,8 +26,10 @@ Needs ffmpeg either way. For the local engine:
 """
 import argparse
 import asyncio
+import glob
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -66,18 +69,47 @@ def find_ffmpeg(explicit: str | None) -> str:
     )
 
 
+def natural_key(path: Path):
+    """Sort part2 before part10, the way a person reads the names.
+
+    A multi-part recording downloads as -part1 ... -part16, and plain text
+    ordering puts part10 second. Concatenating in that order rearranges the
+    lecture without anything looking wrong.
+    """
+    return [int(piece) if piece.isdigit() else piece.lower()
+            for piece in re.split(r"(\d+)", path.name)]
+
+
+def concat_list(sources: list[Path], workdir: Path) -> Path:
+    """An ffmpeg concat manifest for several recordings, in order."""
+    listing = workdir / "inputs.txt"
+    lines = [f"file '{source.resolve().as_posix()}'" for source in sources]
+    listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return listing
+
+
 def have_faster_whisper() -> bool:
     return importlib.util.find_spec("faster_whisper") is not None
 
 
-def to_wav(ffmpeg: str, source: Path, workdir: Path, segment_seconds: int | None) -> list[Path]:
-    """Decode `source` to 16 kHz mono WAV, optionally cut into equal pieces.
+def to_wav(ffmpeg: str, sources: list[Path], workdir: Path,
+           segment_seconds: int | None) -> list[Path]:
+    """Decode the recording to 16 kHz mono WAV, optionally cut into pieces.
+
+    Several inputs are joined in order first, so a recording saved as parts
+    transcribes as the single session it was.
 
     Whisper does its own segmentation, so the local engine takes one whole file;
     the API engine needs pieces small enough for a single request.
     """
+    if len(sources) > 1:
+        listing = concat_list(sources, workdir)
+        read_input = ["-f", "concat", "-safe", "0", "-i", str(listing)]
+    else:
+        read_input = ["-i", str(sources[0])]
+
     command = [
-        ffmpeg, "-v", "error", "-i", str(source),
+        ffmpeg, "-v", "error", *read_input,
         "-ac", "1", "-ar", str(TARGET_SAMPLE_RATE), "-c:a", "pcm_s16le",
     ]
     if segment_seconds:
@@ -88,11 +120,11 @@ def to_wav(ffmpeg: str, source: Path, workdir: Path, segment_seconds: int | None
 
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
-        sys.exit(f"ffmpeg could not read {source.name}:\n{result.stderr.strip()}")
+        sys.exit(f"ffmpeg could not read the audio:\n{result.stderr.strip()}")
 
     pieces = sorted(workdir.glob("*.wav"))
     if not pieces:
-        sys.exit(f"{source.name} contains no audio.")
+        sys.exit("That recording contains no audio.")
     return pieces
 
 
@@ -257,10 +289,38 @@ async def transcribe_gemini(chunks: list[Path], language: str) -> tuple[str, str
     return " ".join(pieces).strip(), detected
 
 
+def collect_sources(patterns: list[str]) -> list[Path]:
+    """Every file named on the command line, in the order they were recorded.
+
+    A directory stands for the audio inside it, so a folder of -part01 files
+    works as one argument. Ordering is natural, not textual, because that is
+    what keeps part2 ahead of part10.
+    """
+    AUDIO = {".webm", ".m4a", ".mp3", ".wav", ".ogg", ".opus", ".mp4", ".aac", ".flac", ".aiff"}
+    found: list[Path] = []
+    for pattern in patterns:
+        path = Path(pattern).expanduser()
+        if path.is_dir():
+            found += [p for p in path.iterdir() if p.is_file() and p.suffix.lower() in AUDIO]
+        elif path.exists():
+            found.append(path)
+        else:
+            matches = [Path(m) for m in glob.glob(pattern)]
+            if not matches:
+                sys.exit(f"No such file: {path}")
+            found += matches
+
+    if not found:
+        sys.exit("No audio files found.")
+    return sorted(found, key=natural_key)
+
+
 async def run(args: argparse.Namespace) -> int:
-    source = Path(args.audio).expanduser()
-    if not source.exists():
-        sys.exit(f"No such file: {source}")
+    sources = collect_sources(args.audio)
+    if len(sources) > 1:
+        print(f"Joining {len(sources)} parts, in this order:", flush=True)
+        for source in sources:
+            print(f"  {source.name}", flush=True)
 
     engine = args.engine
     if engine == "auto":
@@ -277,14 +337,14 @@ async def run(args: argparse.Namespace) -> int:
         sys.exit("No GEMINI_API_KEY in backend/.env - use --engine local instead.")
 
     ffmpeg = find_ffmpeg(args.ffmpeg)
-    destination = Path(args.output) if args.output else source.with_suffix(".txt")
+    destination = Path(args.output) if args.output else sources[0].with_suffix(".txt")
     language = languages.normalize(args.language)
 
     with tempfile.TemporaryDirectory(prefix="retranscribe-") as tmp:
         workdir = Path(tmp)
-        print(f"Converting {source.name} to 16 kHz mono WAV...", flush=True)
+        print("Converting to 16 kHz mono WAV...", flush=True)
         pieces = to_wav(
-            ffmpeg, source, workdir,
+            ffmpeg, sources, workdir,
             None if engine == "local" else args.chunk_seconds,
         )
 
@@ -315,7 +375,12 @@ def main() -> int:
         description=__doc__.splitlines()[0],
         epilog="The local engine costs no API quota and keeps the audio on this machine.",
     )
-    parser.add_argument("audio", help="audio file to transcribe (webm, mp3, m4a, wav, ...)")
+    parser.add_argument(
+        "audio",
+        nargs="+",
+        help="audio file(s) or a folder. Several are joined in order, so a recording "
+             "saved as -part01, -part02 ... transcribes as one session",
+    )
     parser.add_argument("-o", "--output", help="where to write the transcript (default: alongside the audio)")
     parser.add_argument(
         "--engine",

@@ -1,5 +1,4 @@
 """Speech-to-text through Gemini, with automatic language detection."""
-import base64
 import io
 import logging
 import re
@@ -70,9 +69,14 @@ def wav_info(data: bytes) -> tuple[float, int, int, int] | None:
         return None
 
 
-def split_wav(data: bytes, chunk_seconds: int) -> list[bytes]:
-    """Split a WAV into standalone WAV chunks. Returns [data] when it fits."""
-    info = wav_info(data)
+def split_wav(data: bytes, chunk_seconds: int, info: tuple | None = None) -> list[bytes]:
+    """Split a WAV into standalone WAV chunks. Returns [data] when it fits.
+
+    `info` is taken from the caller when it has already read the header:
+    wave.open needs a file object, and io.BytesIO copies, so probing the same
+    upload twice costs a second full copy of the recording for nothing.
+    """
+    info = info if info is not None else wav_info(data)
     if info is None:
         return [data]
     duration, channels, width, rate = info
@@ -138,16 +142,15 @@ Reply with JSON only:
 async def _transcribe_one(
     data: bytes, mime_type: str, language: str, context: str
 ) -> tuple[str, str]:
-    parts = [
-        {"text": _prompt(language, context)},
-        {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(data).decode("ascii")}},
-    ]
     raw = await generate(
-        parts,
+        [{"text": _prompt(language, context)}],
         models=settings.GEMINI_AUDIO_MODELS,
         json_output=True,
         temperature=0.0,
         max_output_tokens=16384,
+        # Handed over raw: the client base64s it straight into the request
+        # stream, so a recording is never held encoded and serialized at once.
+        inline_audio=(mime_type, data),
     )
 
     parsed = parse_json_object(raw)
@@ -193,7 +196,7 @@ async def transcribe(
     duration = info[0] if info else None
 
     chunks = (
-        split_wav(data, settings.AUDIO_CHUNK_SECONDS)
+        split_wav(data, settings.AUDIO_CHUNK_SECONDS, info)
         if resolved_mime == "audio/wav"
         else [data]
     )

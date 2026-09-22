@@ -1,5 +1,6 @@
 """A resilient Gemini client: retries, model fallback, tolerant JSON parsing."""
 import asyncio
+import base64
 import json
 import logging
 import random
@@ -65,6 +66,53 @@ def _extract_text(data: dict) -> str:
     return text
 
 
+# Spliced out of the serialized request and replaced by the encoded audio, so
+# the body is never held whole. Chosen to be something no prompt would contain.
+_AUDIO_SENTINEL = "\x00__lumina_inline_audio__\x00"
+
+
+# Encoded a block at a time. A multiple of 3 so each block is a whole number of
+# base64 groups and the pieces concatenate into exactly what one call would give.
+_B64_BLOCK = 3 * 64 * 1024
+
+
+async def _audio_body(head: bytes, audio: bytes, tail: bytes):
+    """Stream the request, encoding the recording as it goes.
+
+    A fresh generator per attempt, because a retry has to send the body again.
+    """
+    yield head
+    for start in range(0, len(audio), _B64_BLOCK):
+        yield base64.b64encode(audio[start:start + _B64_BLOCK])
+    yield tail
+
+
+def _streaming_body(payload: dict, audio: bytes) -> tuple[bytes, bytes, int]:
+    """Serialize `payload` around `audio`, without ever holding the whole body.
+
+    Sending this as `json=payload` costs several copies of a large recording:
+    the base64 string, the dict holding it, json.dumps' output, and that
+    string's encoding. For a 7 MB upload it came to ~34 MB of peak heap per
+    request, which is what puts a 512 MB instance over the line part-way
+    through a long lecture.
+
+    Serializing around a sentinel keeps json.dumps working on a small object,
+    and the audio is encoded block by block straight into the socket. Base64 is
+    pure ASCII, so it needs no escaping and splices into a JSON string as-is.
+    """
+    template = json.dumps(payload)
+    marker = json.dumps(_AUDIO_SENTINEL)  # quoted exactly as it appears in the body
+    head, separator, tail = template.partition(marker)
+    if not separator:
+        raise GeminiError("Could not place the audio in the request body")
+
+    head_bytes = head.encode() + b'"'
+    tail_bytes = b'"' + tail.encode()
+    # 4 characters per 3 bytes, rounded up; no padding ambiguity to account for.
+    encoded_length = 4 * ((len(audio) + 2) // 3)
+    return head_bytes, tail_bytes, len(head_bytes) + encoded_length + len(tail_bytes)
+
+
 async def generate(
     parts: list[dict],
     *,
@@ -73,6 +121,7 @@ async def generate(
     system_instruction: str | None = None,
     temperature: float = 0.3,
     max_output_tokens: int = 8192,
+    inline_audio: tuple[str, bytes] | None = None,
 ) -> str:
     """Call Gemini with `parts`, walking the model list until one answers.
 
@@ -105,8 +154,20 @@ async def generate(
             )
         ],
     }
+    if inline_audio is not None:
+        mime_type, audio_bytes = inline_audio
+        parts.append({"inline_data": {"mime_type": mime_type, "data": _AUDIO_SENTINEL}})
     if system_instruction:
         payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+
+    # Built once, outside the retry loop: re-encoding a recording on every
+    # attempt would multiply the cost of a rate-limited model.
+    body_head = body_tail = b""
+    body_length = 0
+    streaming = inline_audio is not None
+    if streaming:
+        body_head, body_tail, body_length = _streaming_body(payload, audio_bytes)
+        del inline_audio
 
     client = get_http_client()
     last_error: GeminiError | None = None
@@ -115,14 +176,19 @@ async def generate(
         url = f"{API_ROOT}/{model}:generateContent"
         for attempt in range(1, settings.GEMINI_MAX_ATTEMPTS + 1):
             try:
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers={
-                        "x-goog-api-key": settings.GEMINI_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                )
+                headers = {
+                    "x-goog-api-key": settings.GEMINI_API_KEY,
+                    "Content-Type": "application/json",
+                }
+                if not streaming:
+                    response = await client.post(url, json=payload, headers=headers)
+                else:
+                    headers["Content-Length"] = str(body_length)
+                    response = await client.post(
+                        url,
+                        content=_audio_body(body_head, audio_bytes, body_tail),
+                        headers=headers,
+                    )
             except httpx.TimeoutException as exc:
                 last_error = GeminiError(f"{model} timed out after {settings.GEMINI_TIMEOUT}s")
                 logger.warning("Gemini %s attempt %d timed out: %s", model, attempt, exc)

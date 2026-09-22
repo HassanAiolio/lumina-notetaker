@@ -3,16 +3,23 @@
 Run with:  cd backend && python -m pytest
 Nothing here touches the network or the database.
 """
+import base64
 import io
+import json
 import math
 import struct
 import sys
 import wave
 from pathlib import Path
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+async def _no_sleep(*_a, **_k):
+    return None
 
 import gemini  # noqa: E402
 import languages  # noqa: E402
@@ -297,3 +304,102 @@ def test_drop_loops_never_invents_or_reorders():
 
 def test_drop_loops_handles_empty_input():
     assert retranscribe.drop_loops([]) == ([], 0)
+
+
+# -- gemini: audio is streamed, never held whole --------------------------------
+# Every upload goes through this splice, so a subtle bug here corrupts all audio.
+
+def _wav_bytes(seconds=1, sample_rate=16000):
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(sample_rate)
+        out.writeframes(b"\x01\x02" * (seconds * sample_rate))
+    return buffer.getvalue()
+
+
+class _Recorder(httpx.AsyncBaseTransport):
+    """Captures what actually went on the wire, including how it was framed."""
+
+    def __init__(self, status=200, text='{"text":"ok","language":"fr"}'):
+        self.status, self.text, self.requests = status, text, []
+
+    async def handle_async_request(self, request):
+        chunks = [chunk async for chunk in request.stream]
+        self.requests.append({
+            "body": b"".join(chunks),
+            "blocks": len(chunks),
+            "content_length": request.headers.get("Content-Length"),
+        })
+        return httpx.Response(self.status, json={"candidates": [
+            {"content": {"parts": [{"text": self.text}]}, "finishReason": "STOP"}]})
+
+
+@pytest.fixture
+def recorder(monkeypatch):
+    transport = _Recorder()
+    monkeypatch.setattr(gemini.settings, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(gemini, "_client", httpx.AsyncClient(transport=transport))
+    return transport
+
+
+async def test_inline_audio_arrives_byte_exact(recorder):
+    audio = _wav_bytes(3)
+    await gemini.generate([{"text": "prompt"}], models=["m"], inline_audio=("audio/wav", audio))
+
+    sent = recorder.requests[0]
+    payload = json.loads(sent["body"])  # must still be valid JSON
+    parts = payload["contents"][0]["parts"]
+    inline = next(p for p in parts if "inline_data" in p)
+
+    assert base64.b64decode(inline["inline_data"]["data"]) == audio
+    assert inline["inline_data"]["mime_type"] == "audio/wav"
+    assert any(p.get("text") == "prompt" for p in parts)
+    assert gemini._AUDIO_SENTINEL not in sent["body"].decode("utf-8", "replace")
+
+
+async def test_inline_audio_is_sent_in_blocks_not_one_buffer(recorder):
+    await gemini.generate([{"text": "p"}], models=["m"],
+                          inline_audio=("audio/wav", _wav_bytes(20)))
+    # head + several encoded blocks + tail: proof it is not materialised whole.
+    assert recorder.requests[0]["blocks"] > 3
+
+
+@pytest.mark.parametrize("extra", [0, 1, 2])
+async def test_content_length_matches_body_for_any_padding(recorder, extra):
+    # base64 pads to a multiple of 4; the declared length must survive that.
+    audio = _wav_bytes(1) + b"\x00" * extra
+    await gemini.generate([{"text": "p"}], models=["m"], inline_audio=("audio/wav", audio))
+    sent = recorder.requests[0]
+    assert int(sent["content_length"]) == len(sent["body"])
+
+
+async def test_audio_body_is_resent_on_retry(recorder, monkeypatch):
+    # A generator consumed by the first attempt would leave the retry empty.
+    monkeypatch.setattr(gemini.settings, "GEMINI_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(gemini.asyncio, "sleep", _no_sleep)
+    recorder.status = 503
+    audio = _wav_bytes(2)
+
+    with pytest.raises(gemini.GeminiError):
+        await gemini.generate([{"text": "p"}], models=["m"], inline_audio=("audio/wav", audio))
+
+    assert len(recorder.requests) == 2
+    bodies = {r["body"] for r in recorder.requests}
+    assert len(bodies) == 1  # identical, and neither one empty
+    assert len(recorder.requests[1]["body"]) == len(recorder.requests[0]["body"])
+
+
+async def test_requests_without_audio_are_unchanged(recorder):
+    await gemini.generate([{"text": "just text"}], models=["m"])
+    payload = json.loads(recorder.requests[0]["body"])
+    assert payload["contents"][0]["parts"] == [{"text": "just text"}]
+
+
+async def test_split_wav_trusts_caller_supplied_header():
+    data = _wav_bytes(2)
+    info = transcription.wav_info(data)
+    assert transcription.split_wav(data, 240, info) == [data]
+    # and still works when it has to read the header itself
+    assert transcription.split_wav(data, 240) == [data]
