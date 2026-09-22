@@ -17,6 +17,7 @@ import {
   findQuietCut,
   formatDuration,
   streamWavChunks,
+  toSingleWav,
   toWavChunks,
 } from './audio';
 
@@ -410,5 +411,57 @@ describe('formatDuration', () => {
     expect(formatDuration(600)).toBe('10:00');
     expect(formatDuration(3600)).toBe('1:00:00');
     expect(formatDuration(3 * 3600 + 61)).toBe('3:01:01');
+  });
+});
+
+
+describe('toSingleWav', () => {
+  // The recovery path: someone whose transcription failed wants their audio,
+  // and wants it as one file rather than sixteen.
+  const HEADER = 44;
+
+  it('joins every segment into a single WAV of the right length', async () => {
+    installWebAudio({ decode: decoderOf(30) });
+
+    const segments = Array.from({ length: 5 }, () => fakeSegment());
+    const blob = await toSingleWav(segments);
+
+    const samples = 5 * 30 * TARGET_SAMPLE_RATE;
+    expect(blob.type).toBe('audio/wav');
+    expect(blob.size).toBe(HEADER + samples * 2);
+  }, 30000);
+
+  it('declares the joined length in the header, not one segment', async () => {
+    installWebAudio({ decode: decoderOf(10) });
+
+    const blob = await toSingleWav([fakeSegment(), fakeSegment(), fakeSegment()]);
+    const view = new DataView(await readBlob(blob));
+    const samples = 3 * 10 * TARGET_SAMPLE_RATE;
+
+    expect(view.getUint32(40, true)).toBe(samples * 2);   // data chunk size
+    expect(view.getUint32(4, true)).toBe(36 + samples * 2); // RIFF size
+    expect(view.getUint32(24, true)).toBe(TARGET_SAMPLE_RATE);
+  }, 30000);
+
+  it('reports progress so a long join can say what it is doing', async () => {
+    installWebAudio({ decode: decoderOf(5) });
+
+    const seen = [];
+    await toSingleWav(Array.from({ length: 4 }, () => fakeSegment()), {
+      onProgress: (done, total) => seen.push([done, total]),
+    });
+
+    expect(seen).toEqual([[1, 4], [2, 4], [3, 4], [4, 4]]);
+  });
+
+  it('handles a recording that is only one segment', async () => {
+    installWebAudio({ decode: decoderOf(8) });
+    const blob = await toSingleWav([fakeSegment()]);
+    expect(blob.size).toBe(HEADER + 8 * TARGET_SAMPLE_RATE * 2);
+  });
+
+  it('refuses a recording with nothing in it', async () => {
+    installWebAudio();
+    await expect(toSingleWav([])).rejects.toMatchObject({ reason: 'empty' });
   });
 });

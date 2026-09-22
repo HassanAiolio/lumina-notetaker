@@ -10,7 +10,7 @@ import { LanguageSelect } from './LanguageSelect';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import {
-  AudioDecodeError, estimateChunkCount, formatDuration, streamWavChunks,
+  AudioDecodeError, estimateChunkCount, formatDuration, streamWavChunks, toSingleWav,
 } from '../lib/audio';
 import { errorMessage, transcribeChunk } from '../services/api';
 import { languageName } from '../lib/notes';
@@ -70,6 +70,9 @@ export const Recorder = ({
   // the capture segments rather than one blob, which is also what the
   // transcription pipeline wants back on a retry.
   const [pendingRecording, setPendingRecording] = useState(null);
+  // Joining segments into one file decodes the whole recording, so it is not
+  // instant on a long one and needs to say so.
+  const [joining, setJoining] = useState(null);
 
   const recorder = useAudioRecorder({
     levelRef: audioLevelRef,
@@ -219,34 +222,54 @@ export const Recorder = ({
     setPipelineError('');
   }, [recorder, speech]);
 
-  const handleDownloadAudio = useCallback(() => {
+  const saveFile = useCallback((blob, name) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, []);
+
+  /**
+   * Save the recording as one file.
+   *
+   * Recording happens in segments, but nobody wants sixteen of them in their
+   * downloads folder, and stitching WebM containers back together by hand does
+   * not produce a playable file. So the segments are decoded and written out as
+   * a single WAV. A recording short enough to be one segment is already one
+   * file, and is saved untouched rather than re-encoded.
+   */
+  const handleDownloadAudio = useCallback(async () => {
     const segments = pendingRecording?.segments || [];
-    if (!segments.length) return;
+    if (!segments.length || joining) return;
 
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    const extension = (pendingRecording.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
 
-    // A long recording is several files. Browsers throttle downloads fired in
-    // the same tick, so they are spaced out instead of issued all at once.
-    // Zero-padded: "part10" sorts before "part2" everywhere that orders names
-    // as text, which is every file manager and most scripts. Getting this wrong
-    // silently reassembles the recording in the wrong order.
-    const width = String(segments.length).length;
-    segments.forEach((segment, index) => {
-      const suffix =
-        segments.length > 1 ? `-part${String(index + 1).padStart(width, '0')}` : '';
-      setTimeout(() => {
-        const url = URL.createObjectURL(segment);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `recording-${stamp}${suffix}.${extension}`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }, index * 400);
-    });
-  }, [pendingRecording]);
+    if (segments.length === 1) {
+      const extension = (pendingRecording.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
+      saveFile(segments[0], `recording-${stamp}.${extension}`);
+      return;
+    }
+
+    setJoining({ done: 0, total: segments.length });
+    try {
+      const blob = await toSingleWav(segments, {
+        onProgress: (done, total) => setJoining({ done, total }),
+      });
+      saveFile(blob, `recording-${stamp}.wav`);
+    } catch (err) {
+      setPipelineError(
+        err instanceof AudioDecodeError
+          ? decodeErrorMessage(err)
+          : 'The recording could not be saved as one file.',
+      );
+    } finally {
+      setJoining(null);
+    }
+  }, [joining, pendingRecording, saveFile]);
 
   const liveText = `${speech.captions}${speech.interim}`.trim();
   const nearLimit = recorder.seconds > recorder.maxSeconds - 120;
@@ -473,11 +496,12 @@ export const Recorder = ({
                 </button>
                 <button
                   onClick={handleDownloadAudio}
+                  disabled={!!joining}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-200 border border-white/10 transition-colors duration-200"
                 >
                   <Download size={12} />
-                  {pendingRecording.segments.length > 1
-                    ? `Save the audio (${pendingRecording.segments.length} files)`
+                  {joining
+                    ? `Preparing ${joining.done}/${joining.total}…`
                     : 'Save the audio'}
                 </button>
               </div>

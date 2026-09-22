@@ -239,10 +239,10 @@ export async function decodeToMono16k(blob) {
   return resampleLinear(mixToMono(decoded), decoded.sampleRate, TARGET_SAMPLE_RATE);
 }
 
-/** Wrap Float32 samples in a 16-bit PCM WAV container. */
-export function encodeWav(samples, sampleRate = TARGET_SAMPLE_RATE) {
-  const dataBytes = samples.length * BYTES_PER_SAMPLE;
-  const buffer = new ArrayBuffer(44 + dataBytes);
+/** The 44-byte RIFF/WAVE header for `sampleCount` mono 16-bit samples. */
+function wavHeader(sampleCount, sampleRate) {
+  const dataBytes = sampleCount * BYTES_PER_SAMPLE;
+  const buffer = new ArrayBuffer(44);
   const view = new DataView(buffer);
 
   const writeString = (offset, text) => {
@@ -263,14 +263,59 @@ export function encodeWav(samples, sampleRate = TARGET_SAMPLE_RATE) {
   writeString(36, 'data');
   view.setUint32(40, dataBytes, true);
 
-  let offset = 44;
+  return buffer;
+}
+
+/** Float samples to little-endian 16-bit PCM, clamped rather than wrapped. */
+function pcmBytes(samples) {
+  const buffer = new ArrayBuffer(samples.length * BYTES_PER_SAMPLE);
+  const view = new DataView(buffer);
+  let offset = 0;
   for (let i = 0; i < samples.length; i += 1) {
     const clamped = Math.max(-1, Math.min(1, samples[i]));
     view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
     offset += BYTES_PER_SAMPLE;
   }
+  return buffer;
+}
 
-  return new Blob([buffer], { type: 'audio/wav' });
+/** Wrap Float32 samples in a 16-bit PCM WAV container. */
+export function encodeWav(samples, sampleRate = TARGET_SAMPLE_RATE) {
+  return new Blob([wavHeader(samples.length, sampleRate), pcmBytes(samples)], {
+    type: 'audio/wav',
+  });
+}
+
+/**
+ * Join capture segments into one playable file.
+ *
+ * Segments are separate WebM/MP4 recordings, and simply concatenating those
+ * containers does not make a valid file - most players would read the first
+ * one and stop. So they are decoded and written back out as a single WAV,
+ * which every player and every transcription tool accepts.
+ *
+ * The audio accumulates in a Blob rather than an array of buffers: Blob
+ * storage is managed by the browser and can spill to disk, so joining three
+ * hours does not have to fit in the JavaScript heap. Only one segment is
+ * decoded at a time.
+ */
+export async function toSingleWav(source, { onProgress } = {}) {
+  const segments = (Array.isArray(source) ? source : [source]).filter(Boolean);
+  if (!segments.length) throw new AudioDecodeError('The recording is empty.', 'empty');
+
+  let audio = null;
+  let sampleCount = 0;
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const samples = await decodeToMono16k(segments[index]);
+    const pcm = pcmBytes(samples);
+    sampleCount += samples.length;
+    audio = audio === null ? new Blob([pcm]) : new Blob([audio, pcm]);
+    onProgress?.(index + 1, segments.length);
+    await yieldToUI();
+  }
+
+  return new Blob([wavHeader(sampleCount, TARGET_SAMPLE_RATE), audio], { type: 'audio/wav' });
 }
 
 /**
