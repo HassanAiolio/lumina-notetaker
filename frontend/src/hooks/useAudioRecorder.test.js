@@ -197,6 +197,30 @@ it('stops the clock and rotations while paused', async () => {
   expect(recording.seconds).toBe(6);
 });
 
+it('honours a pause pressed while segments are rotating', async () => {
+  await render();
+  await act(async () => {
+    await api.start();
+  });
+  await tickSeconds(4);
+
+  // The fifth second starts a rotation; pressing pause before it settles used
+  // to find no recorder and do nothing.
+  await act(async () => {
+    jest.advanceTimersByTime(1000);
+    api.pause();
+  });
+
+  expect(api.isPaused).toBe(true);
+  expect(recorders[recorders.length - 1].state).toBe('paused');
+  await tickSeconds(10);
+  expect(api.seconds).toBe(5);
+
+  await act(async () => api.resume());
+  expect(recorders[recorders.length - 1].state).toBe('recording');
+  await act(async () => api.stop());
+});
+
 it('reports nothing recorded when the microphone produced no audio', async () => {
   await render();
   await act(async () => {

@@ -10,7 +10,12 @@ import { LanguageSelect } from './LanguageSelect';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import {
-  AudioDecodeError, estimateChunkCount, formatDuration, streamWavChunks, toSingleWav,
+  AudioDecodeError,
+  chunkSecondsForConnection,
+  estimateChunkCount,
+  formatDuration,
+  streamWavChunks,
+  toSingleWav,
 } from '../lib/audio';
 import { errorMessage, transcribeChunk } from '../services/api';
 import { languageName } from '../lib/notes';
@@ -83,6 +88,7 @@ export const Recorder = ({
   });
   const speech = useSpeechRecognition();
   const abortRef = useRef(null);
+  const stoppingRef = useRef(false);
 
   const busy = stage !== 'idle';
   const hasTranscript = transcript.trim().length > 0;
@@ -119,23 +125,44 @@ export const Recorder = ({
         return;
       }
 
+      // A retry carries on from the chunk that failed. The chunks before it are
+      // already in the transcript, and transcribing them again used to append
+      // the opening of the recording a second time. The chunk length is pinned
+      // with them, so the boundaries line up even if the connection changed.
+      const resumeFrom = recording.progress || {
+        done: 0,
+        context: '',
+        detected: '',
+        chunkSeconds: chunkSecondsForConnection(),
+      };
+
       setPipelineError('');
       setStage('encoding');
       // Chunks arrive lazily, so the real total is only known at the end. The
       // recorded length estimates it to within one chunk.
-      setProgress({ done: 0, total: estimateChunkCount(recording.seconds) });
+      setProgress({
+        done: resumeFrom.done,
+        total: estimateChunkCount(recording.seconds, resumeFrom.chunkSeconds),
+      });
 
       const controller = new AbortController();
       abortRef.current = controller;
 
       const pieces = [];
-      let context = '';
-      let detected = '';
-      let done = 0;
+      let { context, detected, done } = resumeFrom;
+      const remember = (extra = {}) =>
+        setPendingRecording({
+          ...recording,
+          progress: { done, context, detected, chunkSeconds: resumeFrom.chunkSeconds },
+          ...extra,
+        });
 
       try {
-        for await (const chunk of streamWavChunks(segments)) {
+        for await (const chunk of streamWavChunks(segments, {
+          chunkSeconds: resumeFrom.chunkSeconds,
+        })) {
           if (controller.signal.aborted) break;
+          if (chunk.index <= resumeFrom.done) continue;
           setStage('transcribing');
           const result = await transcribeChunk({
             blob: chunk.blob,
@@ -160,15 +187,23 @@ export const Recorder = ({
         }
       } catch (err) {
         setStage('idle');
+        // A cancelled run throws its text away, so it must not move the point
+        // a retry starts from either.
         if (controller.signal.aborted) return;
-        // Whatever came back before the failure is still worth keeping.
+        // Whatever came back before the failure is still worth keeping, and
+        // goes into the transcript now - so a retry must only do the rest.
+        remember();
         if (pieces.length) {
           onTranscriptChange([transcript, pieces.join(' ')].filter(Boolean).join(' ').trim());
           setPipelineError(
-            'Only part of the recording could be transcribed. The text so far is below, and the audio is kept if you want to retry.',
+            'Only part of the recording could be transcribed. The text so far is below, and retrying picks up where it stopped.',
           );
         } else if (err instanceof AudioDecodeError) {
           setPipelineError(decodeErrorMessage(err));
+        } else if (done > 0) {
+          setPipelineError(
+            `${errorMessage(err, 'Transcription failed.')} Retrying picks up where it stopped.`,
+          );
         } else {
           setPipelineError(errorMessage(err, 'Transcription failed.'));
         }
@@ -181,12 +216,15 @@ export const Recorder = ({
       if (controller.signal.aborted) return;
       const text = pieces.join(' ').trim();
 
-      if (!text) {
+      if (!text && !resumeFrom.done) {
         setPipelineError('No speech was detected in that recording.');
         return;
       }
 
-      setPendingRecording(null);
+      // The audio stays until the next recording, so a transcript that came
+      // out wrong can still be saved and redone - it used to be dropped the
+      // moment transcription succeeded, however bad the result.
+      remember({ complete: true });
       if (detected) onDetectedLanguage?.(detected);
       onTranscriptChange([transcript, text].filter(Boolean).join(' ').trim());
       toast.success(
@@ -205,14 +243,22 @@ export const Recorder = ({
   }, [language, localeFor, recorder, speech]);
 
   const handleStop = useCallback(async () => {
-    speech.stop();
-    const recording = await recorder.stop();
-    if (!recording) {
-      setPipelineError('Nothing was recorded. Check that your microphone is working.');
-      return;
+    // The button stays live until the recorder has finished closing, and a
+    // second press would split the segments between two transcriptions.
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    try {
+      speech.stop();
+      const recording = await recorder.stop();
+      if (!recording) {
+        setPipelineError('Nothing was recorded. Check that your microphone is working.');
+        return;
+      }
+      setPendingRecording(recording);
+      await runTranscription(recording);
+    } finally {
+      stoppingRef.current = false;
     }
-    setPendingRecording(recording);
-    await runTranscription(recording);
   }, [recorder, runTranscription, speech]);
 
   const handleDiscard = useCallback(async () => {
@@ -484,7 +530,7 @@ export const Recorder = ({
               <AlertCircle size={15} className="flex-shrink-0 mt-0.5" />
               <span className="leading-relaxed">{pipelineError || recorder.error}</span>
             </div>
-            {pendingRecording && (
+            {pendingRecording && !pendingRecording.complete && (
               <div className="flex flex-wrap gap-2 pl-6">
                 <button
                   onClick={() => runTranscription(pendingRecording)}
@@ -524,13 +570,26 @@ export const Recorder = ({
               <p className="text-xs text-zinc-400 uppercase tracking-widest font-medium">
                 Transcript
               </p>
-              <button
-                onClick={() => onTranscriptChange('')}
-                className="text-xs text-zinc-400 hover:text-red-400 transition-colors duration-200"
-                data-testid="clear-transcript-btn"
-              >
-                Clear
-              </button>
+              <div className="flex items-center gap-4">
+                {pendingRecording?.complete && (
+                  <button
+                    onClick={handleDownloadAudio}
+                    disabled={!!joining}
+                    className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white transition-colors duration-200"
+                    data-testid="save-audio-btn"
+                  >
+                    <Download size={12} />
+                    {joining ? `Preparing ${joining.done}/${joining.total}…` : 'Save the audio'}
+                  </button>
+                )}
+                <button
+                  onClick={() => onTranscriptChange('')}
+                  className="text-xs text-zinc-400 hover:text-red-400 transition-colors duration-200"
+                  data-testid="clear-transcript-btn"
+                >
+                  Clear
+                </button>
+              </div>
             </div>
             <Textarea
               value={transcript}

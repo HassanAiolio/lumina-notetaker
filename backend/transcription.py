@@ -1,11 +1,13 @@
 """Speech-to-text through Gemini, with automatic language detection."""
 import io
+import json
 import logging
 import re
 import wave
 
 import groq
 import languages
+import loops
 from config import settings
 from gemini import GeminiError, generate, parse_json_object
 
@@ -160,7 +162,10 @@ async def _transcribe_one_groq(
         prompt=context[-400:],
     )
 
-    text = result["text"].strip()
+    # Whisper loops too, on a quiet stretch at temperature 0.
+    text, removed = loops.collapse_repeats(result["text"].strip())
+    if removed:
+        logger.warning("Whisper looped (%d repeated words cut)", removed)
     if _NO_SPEECH.match(text):
         text = ""
 
@@ -170,31 +175,100 @@ async def _transcribe_one_groq(
     return text, detected
 
 
+_REPLY_HEAD = re.compile(r'^\s*\[?\s*\{\s*"text"\s*:\s*"', re.DOTALL)
+_REPLY_TAIL = re.compile(
+    r'"\s*(?:,\s*"language"\s*:\s*"[^"]*"\s*)?\}\s*\]?\s*$', re.DOTALL
+)
+_REPLY_LANGUAGE = re.compile(r'"language"\s*:\s*"([^"]+)"')
+
+
+def _salvage_text(raw: str) -> str:
+    """The transcript out of a reply that is JSON-shaped but will not parse.
+
+    A reply that loops until the token ceiling stops mid-string, and one with
+    an unescaped quote in the speech is invalid too. Either used to go into
+    the transcript whole, wrapper and all: '{"text": "c'est aussi ...'.
+    Replies that were never JSON - bare text - come back as they are.
+    """
+    head = _REPLY_HEAD.match(raw)
+    if not head:
+        return raw
+    body = _REPLY_TAIL.sub("", raw[head.end():])
+    return body.replace('\\"', '"').replace("\\n", " ").replace("\\\\", "\\")
+
+
+def _read_reply(raw: str) -> tuple[str, str | None]:
+    """(text, language) from a transcription reply, in any shape it comes in."""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, str):
+        return parsed, None
+    if not isinstance(parsed, (dict, list)):
+        parsed = parse_json_object(raw)
+
+    if isinstance(parsed, list):
+        # JSON mode sometimes answers with a list of segments. Taking only the
+        # first, as parse_json_object does, would drop the rest of the chunk.
+        items = [item for item in parsed if isinstance(item, dict)]
+        text = " ".join(
+            item["text"].strip() for item in items if isinstance(item.get("text"), str)
+        )
+        language = next((item["language"] for item in items if item.get("language")), None)
+        return text, language
+
+    if parsed:
+        text = parsed.get("text")
+        return (text if isinstance(text, str) else ""), parsed.get("language")
+
+    found = _REPLY_LANGUAGE.search(raw)
+    return _salvage_text(raw), found.group(1) if found else None
+
+
+def _is_looping(text: str, removed: int) -> bool:
+    """Did a reply spend a real part of itself repeating one phrase?"""
+    return removed >= 30 or (removed >= 10 and removed * 5 >= len(text.split()) + removed)
+
+
 async def _transcribe_one(
     data: bytes, mime_type: str, language: str, context: str
 ) -> tuple[str, str]:
-    raw = await generate(
-        [{"text": _prompt(language, context)}],
-        models=settings.GEMINI_AUDIO_MODELS,
-        json_output=True,
-        temperature=0.0,
-        max_output_tokens=16384,
-        # Handed over raw: the client base64s it straight into the request
-        # stream, so a recording is never held encoded and serialized at once.
-        inline_audio=(mime_type, data),
-    )
+    # A reply that loops is not reproducible: asked again, the model usually
+    # transcribes the same audio cleanly. So a looping reply gets one more
+    # try, and whichever came back with less repetition is kept - collapsed,
+    # so even a second loop cannot reach the summarizer.
+    best: tuple[str, int, str | None] | None = None
+    for attempt in range(2):
+        raw = await generate(
+            [{"text": _prompt(language, context)}],
+            models=settings.GEMINI_AUDIO_MODELS,
+            json_output=True,
+            # The model's default. Gemini 3 is documented to loop below 1.0,
+            # and 0.0 is where the "des des des ..." transcripts came from.
+            temperature=None,
+            # Four minutes of speech is a couple of thousand tokens. The old
+            # 16384 only ever mattered to a loop, which it let run for minutes.
+            max_output_tokens=8192,
+            # Handed over raw: the client base64s it straight into the request
+            # stream, so a recording is never held encoded and serialized at once.
+            inline_audio=(mime_type, data),
+        )
+        text, reply_language = _read_reply(raw)
+        text, removed = loops.collapse_repeats(text.strip())
+        if best is None or removed < best[1]:
+            best = (text, removed, reply_language)
+        if not _is_looping(text, removed):
+            break
+        logger.warning(
+            "Transcription looped (%d repeated words cut, attempt %d)", removed, attempt + 1
+        )
 
-    parsed = parse_json_object(raw)
-    text = parsed.get("text")
-    if not isinstance(text, str):
-        # Some responses come back as bare text despite the JSON request.
-        text = raw if not parsed else ""
-    text = text.strip()
-
+    text, _, reply_language = best
     if _NO_SPEECH.match(text):
         text = ""
 
-    detected = languages.normalize(parsed.get("language"))
+    detected = languages.normalize(reply_language)
     if detected == languages.AUTO and text:
         detected = languages.detect(text)
     return text, detected

@@ -27,6 +27,7 @@ import languages  # noqa: E402
 import ratelimit  # noqa: E402
 import retranscribe  # noqa: E402
 import summarizer  # noqa: E402
+import loops  # noqa: E402
 import transcription  # noqa: E402
 from models import NoteCreate, NoteUpdate, SummarizeRequest  # noqa: E402
 
@@ -305,6 +306,93 @@ def test_drop_loops_never_invents_or_reorders():
 
 def test_drop_loops_handles_empty_input():
     assert retranscribe.drop_loops([]) == ([], 0)
+
+
+# -- loops: word-level repetition inside one reply -------------------------------
+
+def test_collapse_repeats_cuts_a_one_word_loop():
+    text = "Donc forward transfert. " + "des " * 500 + "OK, la suite."
+    cleaned, removed = loops.collapse_repeats(text)
+    assert cleaned == "Donc forward transfert. des des OK, la suite."
+    assert removed == 498
+
+
+def test_collapse_repeats_cuts_a_phrase_loop_ignoring_punctuation():
+    text = "Alors. " + "pas mal, " * 3 + "on espère que ça, " + "je veux dire. " * 40
+    cleaned, removed = loops.collapse_repeats(text)
+    assert cleaned.endswith("on espère que ça, je veux dire. je veux dire.")
+    assert "pas mal, pas mal, pas mal," in cleaned  # three times is a speaker, not a loop
+    assert removed == 38 * 3
+
+
+def test_collapse_repeats_leaves_ordinary_speech_untouched():
+    text = "Euh euh euh, bon.\nOui oui, c'est c'est c'est ça. Donc donc voilà."
+    assert loops.collapse_repeats(text) == (text, 0)
+
+
+def test_collapse_repeats_handles_tiny_and_empty_input():
+    assert loops.collapse_repeats("") == ("", 0)
+    assert loops.collapse_repeats("des des des") == ("des des des", 0)
+
+
+# -- transcription: replies that are not clean JSON -----------------------------
+
+def test_read_reply_joins_every_segment_of_a_list():
+    raw = '[{"text": "Premier bout.", "language": "fr"}, {"text": "Second bout."}]'
+    assert transcription._read_reply(raw) == ("Premier bout. Second bout.", "fr")
+
+
+def test_read_reply_salvages_a_reply_cut_off_mid_string():
+    raw = '{"text": "c\'est aussi deux indicateurs des des des'
+    text, language = transcription._read_reply(raw)
+    assert text == "c'est aussi deux indicateurs des des des"
+    assert language is None
+
+
+def test_read_reply_salvages_unescaped_quotes():
+    raw = '{"text": "dire "Je ne veux pas" grosso modo", "language": "fr"}'
+    assert transcription._read_reply(raw) == ('dire "Je ne veux pas" grosso modo', "fr")
+
+
+def test_read_reply_keeps_bare_text():
+    assert transcription._read_reply("Juste du texte.") == ("Juste du texte.", None)
+
+
+@pytest.mark.asyncio
+async def test_a_looping_reply_is_retried_and_the_clean_one_kept(monkeypatch):
+    replies = [
+        '{"text": "Bonjour ' + "des " * 300,
+        '{"text": "Bonjour à tous.", "language": "fr"}',
+    ]
+    calls = []
+
+    async def fake_generate(parts, **kwargs):
+        calls.append(kwargs)
+        return replies[len(calls) - 1]
+
+    monkeypatch.setattr(transcription, "generate", fake_generate)
+    text, language = await transcription._transcribe_one(b"x", "audio/wav", "auto", "")
+
+    assert (text, language) == ("Bonjour à tous.", "fr")
+    assert len(calls) == 2
+    assert calls[0]["temperature"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_loops_twice_is_collapsed_not_passed_on(monkeypatch):
+    async def fake_generate(parts, **kwargs):
+        return '{"text": "Bonjour ' + "euh " * 300
+
+    monkeypatch.setattr(transcription, "generate", fake_generate)
+    text, _ = await transcription._transcribe_one(b"x", "audio/wav", "fr", "")
+    assert text == "Bonjour euh euh"
+
+
+def test_split_for_window_cuts_a_stretch_with_no_punctuation():
+    transcript = "Une phrase. " + "des " * 5_000 + "Fin."
+    windows = summarizer.split_for_window(transcript, 1_000)
+    assert all(len(w) <= 1_000 for w in windows)
+    assert " ".join(windows).split() == transcript.split()
 
 
 # -- gemini: audio is streamed, never held whole --------------------------------

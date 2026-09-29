@@ -331,9 +331,15 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
   }, [closeSegment, teardown]);
 
   const pause = useCallback(() => {
+    if (!streamRef.current || pausedRef.current) return;
     const recorder = recorderRef.current?.recorder;
-    if (recorder?.state !== 'recording') return;
-    recorder.pause();
+    // Mid-rotation there is no recorder for a moment. The flag alone is
+    // enough then: rotateSegment opens the next one paused. Returning early
+    // here used to drop the press, and the recording carried on.
+    if (recorder) {
+      if (recorder.state !== 'recording') return;
+      recorder.pause();
+    }
     pausedRef.current = true;
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = null;
@@ -341,9 +347,12 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
   }, []);
 
   const resume = useCallback(() => {
+    if (!streamRef.current || !pausedRef.current) return;
     const recorder = recorderRef.current?.recorder;
-    if (recorder?.state !== 'paused') return;
-    recorder.resume();
+    if (recorder) {
+      if (recorder.state !== 'paused') return;
+      recorder.resume();
+    }
     pausedRef.current = false;
     timerRef.current = setInterval(onTick, 1000);
     setIsPaused(false);

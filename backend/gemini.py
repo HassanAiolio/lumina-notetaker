@@ -119,7 +119,7 @@ async def generate(
     models: list[str] | None = None,
     json_output: bool = True,
     system_instruction: str | None = None,
-    temperature: float = 0.3,
+    temperature: float | None = 0.3,
     max_output_tokens: int = 8192,
     inline_audio: tuple[str, bytes] | None = None,
 ) -> str:
@@ -132,10 +132,11 @@ async def generate(
         raise GeminiError("GEMINI_API_KEY is not configured")
 
     model_list = models or settings.GEMINI_TEXT_MODELS
-    generation_config: dict = {
-        "temperature": temperature,
-        "maxOutputTokens": max_output_tokens,
-    }
+    generation_config: dict = {"maxOutputTokens": max_output_tokens}
+    # None leaves the model on its own default, which Gemini 3 asks for:
+    # below 1.0 it is documented to loop or degrade.
+    if temperature is not None:
+        generation_config["temperature"] = temperature
     if json_output:
         generation_config["responseMimeType"] = "application/json"
 

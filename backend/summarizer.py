@@ -5,6 +5,7 @@ from collections import deque
 
 import groq
 import languages
+import loops
 from config import settings
 from gemini import GeminiError, generate, parse_json_object
 
@@ -157,7 +158,21 @@ def split_for_window(transcript: str, window_chars: int) -> list[str]:
     if len(transcript) <= window_chars:
         return [transcript]
 
-    sentences = re.split(r"(?<=[.!?])\s+", transcript)
+    sentences: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", transcript):
+        # A stretch with no sentence punctuation - unpunctuated speech, or a
+        # transcription loop - would otherwise become one window of any size,
+        # refused as too large however many times it is halved. Cut it at
+        # word boundaries instead.
+        while len(sentence) > window_chars:
+            cut = sentence.rfind(" ", 0, window_chars)
+            if cut <= 0:
+                cut = window_chars
+            sentences.append(sentence[:cut])
+            sentence = sentence[cut:].lstrip()
+        if sentence:
+            sentences.append(sentence)
+
     windows: list[str] = []
     current = ""
     for sentence in sentences:
@@ -481,6 +496,13 @@ async def summarize(transcript: str, language: str = languages.AUTO) -> dict:
     out at once. Local extraction remains the last resort, and says so.
     """
     language = languages.normalize(language)
+
+    # Transcripts saved before transcription collapsed its own loops can still
+    # hold tens of thousands of characters of one repeated word. Summarizing
+    # that costs a provider's whole budget for nothing, so cut it here too.
+    transcript, removed = loops.collapse_repeats(transcript)
+    if removed:
+        logger.warning("Cut %d looped words from the transcript before summarizing", removed)
 
     async def with_gemini(prompt: str) -> str:
         return await generate(
