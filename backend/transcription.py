@@ -234,13 +234,15 @@ def _is_looping(text: str, removed: int) -> bool:
 async def _transcribe_one(
     data: bytes, mime_type: str, language: str, context: str
 ) -> tuple[str, str]:
-    # A reply that loops is not reproducible: asked again, the model usually
-    # transcribes the same audio cleanly. So a looping reply gets one more
-    # try, and whichever came back with less repetition is kept - collapsed,
-    # so even a second loop cannot reach the summarizer.
-    best: tuple[str, int, str | None] | None = None
+    # Two ways a reply loses words: it loops, or it runs out of output tokens
+    # and stops mid-transcript. Neither is reproducible - asked again, the
+    # model usually transcribes the same audio cleanly - so either gets one
+    # more try, and the better reply is kept: complete over cut off, then less
+    # repetitive. Loops are collapsed whichever wins, so one never reaches the
+    # summarizer.
+    best: tuple[bool, int, str, str | None] | None = None
     for attempt in range(2):
-        raw = await generate(
+        raw, finish = await generate(
             [{"text": _prompt(language, context)}],
             models=settings.GEMINI_AUDIO_MODELS,
             json_output=True,
@@ -253,18 +255,29 @@ async def _transcribe_one(
             # Handed over raw: the client base64s it straight into the request
             # stream, so a recording is never held encoded and serialized at once.
             inline_audio=(mime_type, data),
+            # Thinking counts against the output ceiling; on 2.5 Flash it
+            # varied from 1,400 to 5,300 tokens on the same chunk, enough to
+            # cut a transcript short. Verbatim transcription needs none.
+            minimal_thinking=True,
+            with_finish=True,
         )
         text, reply_language = _read_reply(raw)
         text, removed = loops.collapse_repeats(text.strip())
-        if best is None or removed < best[1]:
-            best = (text, removed, reply_language)
-        if not _is_looping(text, removed):
+        truncated = finish == "MAX_TOKENS"
+        # Tuples compare in order: complete before cut off, then fewer repeats.
+        if best is None or (truncated, removed) < best[:2]:
+            best = (truncated, removed, text, reply_language)
+        looping = _is_looping(text, removed)
+        if not looping and not truncated:
             break
         logger.warning(
-            "Transcription looped (%d repeated words cut, attempt %d)", removed, attempt + 1
+            "Transcription %s (%d repeated words cut, attempt %d)",
+            "was cut off at the token limit" if truncated else "looped",
+            removed,
+            attempt + 1,
         )
 
-    text, _, reply_language = best
+    _, _, text, reply_language = best
     if _NO_SPEECH.match(text):
         text = ""
 

@@ -368,7 +368,7 @@ async def test_a_looping_reply_is_retried_and_the_clean_one_kept(monkeypatch):
 
     async def fake_generate(parts, **kwargs):
         calls.append(kwargs)
-        return replies[len(calls) - 1]
+        return replies[len(calls) - 1], "STOP"
 
     monkeypatch.setattr(transcription, "generate", fake_generate)
     text, language = await transcription._transcribe_one(b"x", "audio/wav", "auto", "")
@@ -381,7 +381,7 @@ async def test_a_looping_reply_is_retried_and_the_clean_one_kept(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_reply_that_loops_twice_is_collapsed_not_passed_on(monkeypatch):
     async def fake_generate(parts, **kwargs):
-        return '{"text": "Bonjour ' + "euh " * 300
+        return '{"text": "Bonjour ' + "euh " * 300, "MAX_TOKENS"
 
     monkeypatch.setattr(transcription, "generate", fake_generate)
     text, _ = await transcription._transcribe_one(b"x", "audio/wav", "fr", "")
@@ -396,7 +396,7 @@ async def test_mp3_chunks_go_to_gemini_whole_and_labelled_mp3(monkeypatch):
 
     async def fake_generate(parts, **kwargs):
         sent["mime"], sent["size"] = kwargs["inline_audio"][0], len(kwargs["inline_audio"][1])
-        return '{"text": "Bonjour.", "language": "fr"}'
+        return '{"text": "Bonjour.", "language": "fr"}', "STOP"
 
     monkeypatch.setattr(transcription, "generate", fake_generate)
     data = b"\xff\xf3" + b"\x00" * 50_000
@@ -404,6 +404,62 @@ async def test_mp3_chunks_go_to_gemini_whole_and_labelled_mp3(monkeypatch):
 
     assert sent == {"mime": "audio/mp3", "size": len(data)}
     assert result["chunks"] == 1 and result["text"] == "Bonjour."
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_transcript_is_asked_again_and_the_complete_one_kept(monkeypatch):
+    replies = [
+        ('{"text": "Bonjour à', "MAX_TOKENS"),
+        ('{"text": "Bonjour à tous, on commence.", "language": "fr"}', "STOP"),
+    ]
+    calls = []
+
+    async def fake_generate(parts, **kwargs):
+        calls.append(kwargs)
+        return replies[len(calls) - 1]
+
+    monkeypatch.setattr(transcription, "generate", fake_generate)
+    text, _ = await transcription._transcribe_one(b"x", "audio/mp3", "fr", "")
+
+    assert text == "Bonjour à tous, on commence."
+    assert len(calls) == 2 and calls[0]["minimal_thinking"] is True
+
+
+@pytest.mark.parametrize("model, expected", [
+    ("gemini-2.5-flash", {"thinkingBudget": 0}),
+    ("gemini-3.5-flash", {"thinkingLevel": "low"}),
+])
+async def test_audio_requests_ask_for_minimal_thinking(recorder, model, expected):
+    audio = _wav_bytes(1)
+    await gemini.generate([{"text": "p"}], models=[model], inline_audio=("audio/wav", audio),
+                          minimal_thinking=True)
+    payload = json.loads(recorder.requests[0]["body"])
+    assert payload["generationConfig"]["thinkingConfig"] == expected
+    inline = next(p for p in payload["contents"][0]["parts"] if "inline_data" in p)
+    assert base64.b64decode(inline["inline_data"]["data"]) == audio  # still byte-exact
+
+
+async def test_a_model_that_refuses_thinking_is_asked_again_without(monkeypatch):
+    class RefusesThinking(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.configs = []
+
+        async def handle_async_request(self, request):
+            body = json.loads(b"".join([c async for c in request.stream]))
+            self.configs.append(body["generationConfig"].get("thinkingConfig"))
+            if len(self.configs) == 1:
+                return httpx.Response(400, json={"error": {"message": "thinking_level is not supported"}})
+            return httpx.Response(200, json={"candidates": [
+                {"content": {"parts": [{"text": "ok"}]}, "finishReason": "STOP"}]})
+
+    transport = RefusesThinking()
+    monkeypatch.setattr(gemini.settings, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(gemini, "_client", httpx.AsyncClient(transport=transport))
+    text = await gemini.generate([{"text": "p"}], models=["gemini-3.5-flash"],
+                                 inline_audio=("audio/wav", _wav_bytes(1)), minimal_thinking=True)
+
+    assert text == "ok"
+    assert transport.configs == [{"thinkingLevel": "low"}, None]
 
 
 def test_split_for_window_cuts_a_stretch_with_no_punctuation():

@@ -54,6 +54,8 @@ let webpackConfig = {
       moduleNameMapper: {
         ...jestConfig.moduleNameMapper,
         '^@breezystack/lamejs$': '<rootDir>/node_modules/@breezystack/lamejs/dist/lamejs.js',
+        // axios hands jsdom its ES module build, which Jest cannot load as is.
+        '^axios$': '<rootDir>/node_modules/axios/dist/node/axios.cjs',
       },
     }),
   },

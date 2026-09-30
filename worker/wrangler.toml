@@ -1,0 +1,21 @@
+name = "lumina-transcribe"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Logs from console.log, visible with `npx wrangler tail` or in the dashboard.
+[observability]
+enabled = true
+
+[vars]
+# Where the app is served from, comma-separated. Replace the first entry with
+# your Vercel URL (or custom domain) - requests from anywhere else get no CORS
+# headers, so a browser will refuse to read the reply.
+ALLOWED_ORIGINS = "https://your-app.vercel.app,http://localhost:3000"
+GEMINI_AUDIO_MODELS = "gemini-3.5-flash,gemini-2.5-flash,gemini-3.1-flash-lite"
+GROQ_AUDIO_MODELS = "whisper-large-v3,whisper-large-v3-turbo"
+
+# Secrets are not kept here. Set each once with `npx wrangler secret put NAME`:
+#   JWT_SECRET      the backend's JWT_SECRET exactly, so sign-ins carry over
+#   GEMINI_API_KEY
+#   GROQ_API_KEY
+# For `npx wrangler dev`, put the same three in worker/.dev.vars (git-ignored).

@@ -88,3 +88,7 @@ android-sdk/
 # Source 3D models kept for re-optimising; the compressed ones in
 # frontend/public/models are what ships. See README for the command.
 frontend/models-src/
+
+# Cloudflare Worker local secrets and build cache
+worker/.dev.vars
+.wrangler/

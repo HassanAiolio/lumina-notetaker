@@ -48,7 +48,8 @@ async def close_http_client() -> None:
     _client = None
 
 
-def _extract_text(data: dict) -> str:
+def _extract_text(data: dict) -> tuple[str, str | None]:
+    """(text, finishReason) of the first candidate."""
     candidates = data.get("candidates") or []
     if not candidates:
         reason = (data.get("promptFeedback") or {}).get("blockReason")
@@ -57,13 +58,30 @@ def _extract_text(data: dict) -> str:
     candidate = candidates[0]
     finish = candidate.get("finishReason")
     parts = (candidate.get("content") or {}).get("parts") or []
-    text = "".join(part.get("text", "") for part in parts).strip()
+    # Thought summaries are the model's reasoning, not its answer.
+    text = "".join(part.get("text", "") for part in parts if not part.get("thought")).strip()
 
     if not text:
         raise GeminiError(f"Gemini returned an empty response (finishReason={finish})")
     if finish == "MAX_TOKENS":
         logger.warning("Gemini hit the output token ceiling; response may be truncated")
-    return text
+    return text, finish
+
+
+def thinking_for(model: str) -> dict | None:
+    """The smallest thinking setting each model family accepts.
+
+    Thinking tokens count against maxOutputTokens, and on one four minute chunk
+    Gemini 2.5 Flash spent anywhere from 1,400 to 5,300 of them - so a run that
+    thought a little longer ran out of room and returned a transcript cut off
+    part-way. Work that needs no reasoning, like verbatim transcription, asks
+    for as little as the model allows.
+    """
+    if model.startswith("gemini-2.5"):
+        return {"thinkingBudget": 0}
+    if model.startswith("gemini-3"):
+        return {"thinkingLevel": "low"}
+    return None
 
 
 # Spliced out of the serialized request and replaced by the encoded audio, so
@@ -122,11 +140,17 @@ async def generate(
     temperature: float | None = 0.3,
     max_output_tokens: int = 8192,
     inline_audio: tuple[str, bytes] | None = None,
-) -> str:
+    minimal_thinking: bool = False,
+    with_finish: bool = False,
+) -> str | tuple[str, str | None]:
     """Call Gemini with `parts`, walking the model list until one answers.
 
     Each model gets `GEMINI_MAX_ATTEMPTS` tries with jittered exponential
     backoff before we move on to the next one.
+
+    `minimal_thinking` asks each model for as little reasoning as it takes
+    (see thinking_for). `with_finish` returns (text, finishReason) instead of
+    the text alone, so a caller can tell a complete reply from a cut-off one.
     """
     if not settings.GEMINI_API_KEY:
         raise GeminiError("GEMINI_API_KEY is not configured")
@@ -161,20 +185,28 @@ async def generate(
     if system_instruction:
         payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
-    # Built once, outside the retry loop: re-encoding a recording on every
-    # attempt would multiply the cost of a rate-limited model.
-    body_head = body_tail = b""
-    body_length = 0
     streaming = inline_audio is not None
     if streaming:
-        body_head, body_tail, body_length = _streaming_body(payload, audio_bytes)
         del inline_audio
+
+    def prepare(thinking: dict | None) -> tuple[bytes, bytes, int]:
+        """Set this model's config and, for audio, re-serialize around it.
+
+        Only the small JSON wrapper is rebuilt: the recording is spliced in
+        and encoded as it is sent, never here, so a retry costs nothing extra.
+        """
+        payload["generationConfig"] = (
+            {**generation_config, "thinkingConfig": thinking} if thinking else generation_config
+        )
+        return _streaming_body(payload, audio_bytes) if streaming else (b"", b"", 0)
 
     client = get_http_client()
     last_error: GeminiError | None = None
 
     for model in model_list:
         url = f"{API_ROOT}/{model}:generateContent"
+        thinking = thinking_for(model) if minimal_thinking else None
+        body_head, body_tail, body_length = prepare(thinking)
         for attempt in range(1, settings.GEMINI_MAX_ATTEMPTS + 1):
             try:
                 headers = {
@@ -199,10 +231,19 @@ async def generate(
             else:
                 if response.status_code == 200:
                     try:
-                        return _extract_text(response.json())
+                        text, finish = _extract_text(response.json())
+                        return (text, finish) if with_finish else text
                     except GeminiError as exc:
                         last_error = exc
                         logger.warning("Gemini %s attempt %d: %s", model, attempt, exc)
+                elif thinking and response.status_code == 400 and "thinking" in response.text.lower():
+                    # This model does not take that thinking setting. Asking
+                    # again without it beats losing the model altogether.
+                    logger.warning("Gemini %s refused thinking %s; retrying without", model, thinking)
+                    thinking = None
+                    body_head, body_tail, body_length = prepare(None)
+                    last_error = GeminiError(f"{model} refused the thinking setting", status_code=400)
+                    continue
                 else:
                     body = response.text[:500]
                     quota = response.status_code == 429 or "quota" in body.lower()

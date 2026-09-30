@@ -204,7 +204,47 @@ Open [http://localhost:3000](http://localhost:3000).
 cd backend
 pip install -r requirements-dev.txt
 python -m pytest
+
+cd ../frontend && CI=true npm test
+cd ../worker && npm test
 ```
+
+### 5. Transcription Worker (Cloudflare)
+
+Audio is over 99% of the bytes the app moves. Sent through the Render backend, every chunk
+counted against Render's 5 GB of monthly outbound bandwidth, and running out suspended the
+whole backend. `worker/` is a Cloudflare Worker that transcribes chunks instead. Its
+traffic is not metered, and the free plan's 100 MB body and 100,000 requests a day are far
+above what the app needs. The backend's `/api/transcribe` stays as the fallback. The app
+retries a chunk there only when the Worker itself fails (unreachable, crashing,
+misconfigured), not when every service is out of quota, since the backend holds the same
+keys.
+
+Each chunk tries, in order: Gemini 3.5 Flash → 2.5 Flash → 3.1 Flash-Lite → Groq
+`whisper-large-v3` → `whisper-large-v3-turbo`. Each has its own free quota; the free Gemini
+3.5 Flash alone allows only 20 requests a day. A model that runs out is skipped for the rest
+of the lecture instead of being asked again for every chunk.
+
+One-time setup (free Cloudflare account, no card):
+
+```bash
+cd worker
+npm install
+npx wrangler login                    # opens the browser once
+npx wrangler secret put JWT_SECRET    # exactly the backend's JWT_SECRET
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put GROQ_API_KEY
+# edit wrangler.toml: put your Vercel URL first in ALLOWED_ORIGINS
+npx wrangler deploy                   # prints https://lumina-transcribe.<you>.workers.dev
+```
+
+Then in Vercel, set `REACT_APP_TRANSCRIBE_URL` to that URL and redeploy the frontend. It is
+read at build time. Without it the app uses the backend alone, as before. To check it's
+live: `curl https://lumina-transcribe.<you>.workers.dev/health`. To watch requests:
+`npx wrangler tail`.
+
+For local work, put the same three secrets in `worker/.dev.vars` (git-ignored) and run
+`npm run dev`.
 
 ---
 

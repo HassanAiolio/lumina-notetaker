@@ -105,13 +105,78 @@ export const fetchMe = async () => (await client.get('/auth/me')).data;
 
 // ── Transcription and notes ──────────────────────────────────────────────────
 
-export const transcribeChunk = async ({ blob, language = 'auto', context = '', signal }) => {
+// Audio goes to the transcription Worker when one is configured, because its
+// traffic is not metered: sent through the backend, every chunk counted
+// against Render's 5 GB a month, and running out suspended the whole app.
+// The backend's own /transcribe stays as the second path.
+const TRANSCRIBE_URL = (process.env.REACT_APP_TRANSCRIBE_URL || '').replace(/\/+$/, '');
+
+// Its own client, not `client`: that one signs people out on any 401, and a
+// Worker with the wrong secret must never do that. The backend decides.
+export const workerClient = axios.create({ timeout: 180000 });
+
+const viaBackend = async ({ blob, language, context, signal }) => {
   const form = new FormData();
   form.append('file', blob, blob.type === 'audio/mpeg' ? 'chunk.mp3' : 'chunk.wav');
   form.append('language', language);
   form.append('context', context);
   const response = await client.post('/transcribe', form, { signal });
   return response.data;
+};
+
+// The raw chunk as the body, the rest as query parameters: the Worker would
+// otherwise spend its small CPU allowance parsing a form.
+const viaWorker = async ({ blob, language, context, signal }) => {
+  const token = tokenStore.get();
+  const response = await workerClient.post(`${TRANSCRIBE_URL}/transcribe`, blob, {
+    params: { language, context },
+    headers: {
+      'Content-Type': blob.type || 'audio/mpeg',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    signal,
+  });
+  return response.data;
+};
+
+/**
+ * Is a Worker failure worth retrying through the backend?
+ *
+ * Only when the Worker itself is the problem - unreachable, misconfigured,
+ * crashing. Not when the audio was refused, which the backend would refuse
+ * too, and not when every transcription service was out of quota: the backend
+ * holds the same keys, so it would meet the same refusals and spend its
+ * metered bandwidth on the way.
+ */
+export const shouldFallBack = (error) => {
+  if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') return false;
+  const status = error?.response?.status;
+  if (!status) return true;
+  if (status === 400 || status === 413) return false;
+  if (error.response.data?.code === 'providers_failed') return false;
+  return true;
+};
+
+// After the Worker fails for its own reasons, the next few minutes of chunks
+// go straight to the backend rather than each waiting on the same failure.
+const WORKER_COOLDOWN_MS = 5 * 60 * 1000;
+let workerDownUntil = 0;
+export const resetTranscriptionRoute = () => {
+  workerDownUntil = 0;
+};
+
+export const transcribeChunk = async ({ blob, language = 'auto', context = '', signal }) => {
+  const args = { blob, language, context, signal };
+  if (!TRANSCRIBE_URL || Date.now() < workerDownUntil) return viaBackend(args);
+  try {
+    return await viaWorker(args);
+  } catch (error) {
+    if (!shouldFallBack(error)) throw error;
+    workerDownUntil = Date.now() + WORKER_COOLDOWN_MS;
+    // eslint-disable-next-line no-console
+    console.warn('Transcription Worker failed, using the backend instead:', error?.message);
+    return viaBackend(args);
+  }
 };
 
 // Summarizing walks a long transcript window by window, and a rate-limited
