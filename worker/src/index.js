@@ -22,7 +22,9 @@ const BUDGET_MS = 150_000;
 
 function corsHeaders(request, env) {
   const origin = request.headers.get('Origin');
-  const allowed = csv(env.ALLOWED_ORIGINS, 'http://localhost:3000');
+  // Browsers send an origin with no trailing slash; one copied from the
+  // address bar usually has it, and would then never match.
+  const allowed = csv(env.ALLOWED_ORIGINS, 'http://localhost:3000').map((o) => o.replace(/\/+$/, ''));
   if (!origin || !allowed.includes(origin)) return {};
   return {
     'Access-Control-Allow-Origin': origin,
