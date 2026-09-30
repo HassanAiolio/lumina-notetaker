@@ -107,7 +107,7 @@ export const fetchMe = async () => (await client.get('/auth/me')).data;
 
 export const transcribeChunk = async ({ blob, language = 'auto', context = '', signal }) => {
   const form = new FormData();
-  form.append('file', blob, 'chunk.wav');
+  form.append('file', blob, blob.type === 'audio/mpeg' ? 'chunk.mp3' : 'chunk.wav');
   form.append('language', language);
   form.append('context', context);
   const response = await client.post('/transcribe', form, { signal });

@@ -41,6 +41,22 @@ let webpackConfig = {
       },
     },
   },
+  jest: {
+    // The MP3 encoder ships an ES module and a script-tag build that exports
+    // nothing to CommonJS. Jest would pick the latter and get an empty object,
+    // so point it at the module build and let Babel transform it.
+    configure: (jestConfig) => ({
+      ...jestConfig,
+      transformIgnorePatterns: [
+        '[/\\\\]node_modules[/\\\\](?!@breezystack[/\\\\]lamejs[/\\\\]).+\\.(js|jsx|mjs|cjs|ts|tsx)$',
+        '^.+\\.module\\.(css|sass|scss)$',
+      ],
+      moduleNameMapper: {
+        ...jestConfig.moduleNameMapper,
+        '^@breezystack/lamejs$': '<rootDir>/node_modules/@breezystack/lamejs/dist/lamejs.js',
+      },
+    }),
+  },
   webpack: {
     alias: {
       '@': path.resolve(__dirname, 'src'),

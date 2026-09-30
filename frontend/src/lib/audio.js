@@ -22,6 +22,18 @@ export const TARGET_SAMPLE_RATE = 16000;
 export const CHUNK_SECONDS = 240;
 
 /**
+ * Bitrate for the MP3 chunks sent to transcription.
+ *
+ * Every chunk crosses the backend twice, and the hop out to the speech model
+ * is metered: as WAV, an hour of lecture cost ~150 MB of hosting bandwidth.
+ * 96 kbps makes it 2.7 times smaller. Lower was measured and rejected: on real
+ * lecture audio, with a deterministic Whisper, 32-64 kbps changed the
+ * transcript measurably more than an inaudible perturbation of the WAV does,
+ * while 96 kbps sat on that floor. Saving bandwidth is not worth words.
+ */
+export const MP3_KBPS = 96;
+
+/**
  * How much audio goes into one capture segment. Every segment is a complete,
  * self-contained recording, so it can be decoded on its own and then dropped.
  * Five minutes decodes to ~19 MB of samples, which any phone can hold.
@@ -286,6 +298,69 @@ export function encodeWav(samples, sampleRate = TARGET_SAMPLE_RATE) {
   });
 }
 
+// Loaded on first use: the encoder is a sizeable script that only matters once
+// someone has stopped a recording, so it stays out of the first page load.
+let mp3EncoderModule = null;
+const loadMp3Encoder = () => {
+  if (!mp3EncoderModule) {
+    mp3EncoderModule = import('@breezystack/lamejs').catch((err) => {
+      mp3EncoderModule = null; // a failed chunk download can be tried again
+      throw err;
+    });
+  }
+  return mp3EncoderModule;
+};
+
+// Samples handed to the encoder per call: 50 MP3 frames, ~3.6 s of audio.
+const MP3_BLOCK = 1152 * 50;
+
+/**
+ * Float32 samples to an MP3 Blob, via LAME.
+ *
+ * Encoding four minutes takes a couple of seconds on a laptop and longer on a
+ * phone, so the work is cut into blocks with a yield between them rather than
+ * freezing the page for the whole chunk.
+ */
+export async function encodeMp3(samples, sampleRate = TARGET_SAMPLE_RATE, kbps = MP3_KBPS) {
+  const { Mp3Encoder } = await loadMp3Encoder();
+  const encoder = new Mp3Encoder(1, sampleRate, kbps);
+  const parts = [];
+  const pcm = new Int16Array(Math.min(MP3_BLOCK, samples.length));
+
+  for (let start = 0; start < samples.length; start += MP3_BLOCK) {
+    const length = Math.min(MP3_BLOCK, samples.length - start);
+    for (let i = 0; i < length; i += 1) {
+      const clamped = Math.max(-1, Math.min(1, samples[start + i]));
+      pcm[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    }
+    // Each call returns a fresh copy of what it produced, safe to keep.
+    const frame = encoder.encodeBuffer(pcm.subarray(0, length));
+    if (frame.length) parts.push(frame);
+    // eslint-disable-next-line no-await-in-loop
+    await yieldToUI();
+  }
+  const tail = encoder.flush();
+  if (tail.length) parts.push(tail);
+
+  return new Blob(parts, { type: 'audio/mpeg' });
+}
+
+/**
+ * One chunk in the format asked for. MP3 falls back to WAV if the encoder
+ * cannot load or run, because a bigger upload beats a failed transcription.
+ */
+async function encodeChunk(samples, format) {
+  if (format === 'mp3') {
+    try {
+      return await encodeMp3(samples);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('MP3 encoding failed, sending WAV instead', err);
+    }
+  }
+  return encodeWav(samples);
+}
+
 /**
  * Join capture segments into one playable file.
  *
@@ -345,7 +420,7 @@ export function findQuietCut(samples, idealEnd, searchSeconds = 12) {
 }
 
 /**
- * Yield WAV chunks of at most `chunkSeconds` from one or more capture segments.
+ * Yield audio chunks of at most `chunkSeconds` from one or more capture segments.
  *
  * Each segment is decoded only when its turn comes and is released as soon as
  * it has been emitted, so a three hour recording costs no more memory than a
@@ -355,8 +430,15 @@ export function findQuietCut(samples, idealEnd, searchSeconds = 12) {
  * Consume it with `for await`; the caller is expected to upload each chunk
  * before asking for the next, which is also what keeps encoded WAVs from
  * piling up.
+ *
+ * `format` is 'wav' or 'mp3' (see MP3_KBPS). The cut points are worked out on
+ * the samples, so they are the same in either format. `skipChunks` leaves out
+ * the first N chunks without encoding them, for a retry that resumes part-way.
  */
-export async function* streamWavChunks(source, { chunkSeconds } = {}) {
+export async function* streamWavChunks(
+  source,
+  { chunkSeconds, format = 'wav', skipChunks = 0 } = {},
+) {
   const segments = (Array.isArray(source) ? source : [source]).filter(Boolean);
   if (!segments.length) throw new AudioDecodeError('The recording is empty.', 'empty');
 
@@ -383,11 +465,13 @@ export async function* streamWavChunks(source, { chunkSeconds } = {}) {
       let end = Math.min(start + chunkSamples, samples.length);
       // Only hunt for a quiet boundary when there is more audio after this chunk.
       if (end < samples.length) end = findQuietCut(samples, end);
-      // encodeWav copies into its own buffer, so a view is enough here.
+      // Both encoders copy into their own buffers, so a view is enough here.
       const slice = samples.subarray(start, end);
       index += 1;
-      yield { blob: encodeWav(slice), seconds: slice.length / TARGET_SAMPLE_RATE, index };
       start = end;
+      if (index <= skipChunks) continue;
+      const blob = await encodeChunk(slice, format);
+      yield { blob, seconds: slice.length / TARGET_SAMPLE_RATE, index };
       // encodeWav walks every sample synchronously; on a phone a long recording
       // would otherwise lock the interface for seconds at a time.
       await yieldToUI();

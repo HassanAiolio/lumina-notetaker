@@ -112,10 +112,10 @@ export const Recorder = ({
   /**
    * Encode and upload the recording one chunk at a time.
    *
-   * Chunks are pulled from the encoder as each upload finishes rather than all
-   * built up front, so only one chunk of audio is ever in memory and the first
-   * upload starts as soon as the first four minutes have been encoded instead
-   * of after the whole recording has.
+   * Chunks are pulled from the encoder one ahead of the upload rather than all
+   * built up front, so at most two chunks of audio are ever in memory and the
+   * first upload starts as soon as the first four minutes have been encoded
+   * instead of after the whole recording has.
    */
   const runTranscription = useCallback(
     async (recording) => {
@@ -157,13 +157,32 @@ export const Recorder = ({
           ...extra,
         });
 
+      // MP3 rather than WAV: a chunk is 2.7 times smaller, which is what keeps
+      // the backend inside its hosting bandwidth (see MP3_KBPS for why 96 kbps).
+      const chunks = streamWavChunks(segments, {
+        chunkSeconds: resumeFrom.chunkSeconds,
+        format: 'mp3',
+        skipChunks: resumeFrom.done,
+      });
+      // The next chunk is encoded while the current one uploads. MP3 encoding
+      // takes seconds per chunk on a phone, and done in series it would add up
+      // over a long lecture. The catch only marks a failure as handled here;
+      // awaiting the same promise below still throws it.
+      const prepare = () => {
+        const pending = chunks.next();
+        pending.catch(() => {});
+        return pending;
+      };
+      let upcoming = prepare();
+
       try {
-        for await (const chunk of streamWavChunks(segments, {
-          chunkSeconds: resumeFrom.chunkSeconds,
-        })) {
-          if (controller.signal.aborted) break;
-          if (chunk.index <= resumeFrom.done) continue;
+        for (;;) {
+          // eslint-disable-next-line no-await-in-loop
+          const { value: chunk, done: finished } = await upcoming;
+          if (finished || controller.signal.aborted) break;
+          upcoming = prepare();
           setStage('transcribing');
+          // eslint-disable-next-line no-await-in-loop
           const result = await transcribeChunk({
             blob: chunk.blob,
             language,
@@ -210,6 +229,8 @@ export const Recorder = ({
         return;
       } finally {
         abortRef.current = null;
+        // Stop the encoder working ahead on a chunk nobody will upload.
+        chunks.return().catch(() => {});
       }
 
       setStage('idle');

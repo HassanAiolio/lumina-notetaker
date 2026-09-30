@@ -9,9 +9,11 @@
  */
 import {
   AudioDecodeError,
+  MP3_KBPS,
   SEGMENT_SECONDS,
   TARGET_SAMPLE_RATE,
   decodeToMono16k,
+  encodeMp3,
   encodeWav,
   estimateChunkCount,
   findQuietCut,
@@ -463,5 +465,87 @@ describe('toSingleWav', () => {
   it('refuses a recording with nothing in it', async () => {
     installWebAudio();
     await expect(toSingleWav([])).rejects.toMatchObject({ reason: 'empty' });
+  });
+});
+
+// The bitrate was chosen by measuring transcripts, not by ear (see MP3_KBPS),
+// so these pin that what goes out really is that stream.
+describe('MP3 chunks', () => {
+  const sine = (seconds) => {
+    const samples = new Float32Array(Math.round(seconds * TARGET_SAMPLE_RATE));
+    for (let i = 0; i < samples.length; i += 1) {
+      samples[i] = 0.5 * Math.sin((2 * Math.PI * 220 * i) / TARGET_SAMPLE_RATE);
+    }
+    return samples;
+  };
+
+  it('encodes 16 kHz mono at the chosen bitrate', async () => {
+    const blob = await encodeMp3(sine(5));
+    const bytes = new Uint8Array(await readBlob(blob));
+
+    expect(blob.type).toBe('audio/mpeg');
+    // Frame header: sync, MPEG-2 layer III, then the bitrate and rate indexes.
+    expect(bytes[0]).toBe(0xff);
+    expect(bytes[1]).toBe(0xf3);
+    expect(bytes[2] >> 4).toBe(10); // 96 kbps in the MPEG-2 layer III table
+    expect((bytes[2] >> 2) & 3).toBe(2); // 16000 Hz
+    // About bitrate x duration, give or take the encoder's padding.
+    expect(bytes.length).toBeGreaterThan((MP3_KBPS * 1000 * 5) / 8 * 0.9);
+    expect(bytes.length).toBeLessThan((MP3_KBPS * 1000 * 5.5) / 8);
+  });
+
+  it('cuts at the same places as WAV, in a fraction of the size', async () => {
+    installWebAudio({ decode: decoderOf(100) });
+    const wav = await toWavChunks([fakeSegment()], 40);
+
+    installWebAudio({ decode: decoderOf(100) });
+    const mp3 = [];
+    for await (const chunk of streamWavChunks([fakeSegment()], { chunkSeconds: 40, format: 'mp3' })) {
+      mp3.push(chunk);
+    }
+
+    expect(mp3.map((c) => [c.index, c.seconds])).toEqual(wav.map((c) => [c.index, c.seconds]));
+    mp3.forEach((chunk, i) => {
+      expect(chunk.blob.type).toBe('audio/mpeg');
+      expect(chunk.blob.size).toBeLessThan(wav[i].blob.size / 2.5);
+    });
+  }, 30000);
+
+  it('skips the chunks a resumed retry has already done', async () => {
+    installWebAudio({ decode: decoderOf(100) });
+    const all = await toWavChunks([fakeSegment()], 40);
+
+    installWebAudio({ decode: decoderOf(100) });
+    const rest = [];
+    for await (const chunk of streamWavChunks([fakeSegment()], { chunkSeconds: 40, skipChunks: 2 })) {
+      rest.push(chunk);
+    }
+
+    expect(all.length).toBeGreaterThan(2);
+    expect(rest.map((c) => [c.index, c.seconds])).toEqual(
+      all.slice(2).map((c) => [c.index, c.seconds]),
+    );
+  });
+
+  it('falls back to WAV when the encoder cannot load', async () => {
+    let isolated;
+    jest.isolateModules(() => {
+      jest.doMock('@breezystack/lamejs', () => {
+        throw new Error('chunk failed to download');
+      });
+      isolated = require('./audio'); // eslint-disable-line global-require
+    });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    installWebAudio({ decode: decoderOf(10) });
+    const chunks = [];
+    for await (const chunk of isolated.streamWavChunks([fakeSegment()], { format: 'mp3' })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].blob.type).toBe('audio/wav');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

@@ -388,6 +388,24 @@ async def test_a_reply_that_loops_twice_is_collapsed_not_passed_on(monkeypatch):
     assert text == "Bonjour euh euh"
 
 
+@pytest.mark.asyncio
+async def test_mp3_chunks_go_to_gemini_whole_and_labelled_mp3(monkeypatch):
+    # The browser sends MP3 to save hosting bandwidth. It must reach the model
+    # as one piece, under the mime type Gemini documents for it.
+    sent = {}
+
+    async def fake_generate(parts, **kwargs):
+        sent["mime"], sent["size"] = kwargs["inline_audio"][0], len(kwargs["inline_audio"][1])
+        return '{"text": "Bonjour.", "language": "fr"}'
+
+    monkeypatch.setattr(transcription, "generate", fake_generate)
+    data = b"\xff\xf3" + b"\x00" * 50_000
+    result = await transcription.transcribe(data, "audio/mpeg", language="fr")
+
+    assert sent == {"mime": "audio/mp3", "size": len(data)}
+    assert result["chunks"] == 1 and result["text"] == "Bonjour."
+
+
 def test_split_for_window_cuts_a_stretch_with_no_punctuation():
     transcript = "Une phrase. " + "des " * 5_000 + "Fin."
     windows = summarizer.split_for_window(transcript, 1_000)
