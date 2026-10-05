@@ -109,6 +109,17 @@ class Settings:
     # rather than repeating them. Also capped at a quarter of the window.
     NOTES_CARRY_CHARS: int = _int("NOTES_CARRY_CHARS", 4_000)
 
+    # ── Slides ────────────────────────────────────────────────────────────
+    # A deck's text arrives with the transcript (extracted in the browser, so
+    # the PDF never crosses the metered backend). Each window is shown only the
+    # slides that match what it is about, within this many characters.
+    MAX_SLIDE_PAGES: int = _int("MAX_SLIDE_PAGES", 400)
+    SLIDE_TEXT_CHARS: int = _int("SLIDE_TEXT_CHARS", 1_500)
+    SLIDE_CONTEXT_CHARS: int = _int("SLIDE_CONTEXT_CHARS", 6_000)
+    # Pictures of the pages the notes cite, kept so the notes can show them.
+    MAX_SLIDE_IMAGES: int = _int("MAX_SLIDE_IMAGES", 60)
+    MAX_SLIDE_IMAGE_BYTES: int = _int("MAX_SLIDE_IMAGE_BYTES", 400_000)
+
     # Per-user sliding-window rate limits: (requests, window_seconds)
     RATE_LIMIT_AI: tuple[int, int] = (_int("RATE_LIMIT_AI_REQUESTS", 30), _int("RATE_LIMIT_AI_WINDOW", 60))
     RATE_LIMIT_WRITE: tuple[int, int] = (_int("RATE_LIMIT_WRITE_REQUESTS", 120), _int("RATE_LIMIT_WRITE_WINDOW", 60))

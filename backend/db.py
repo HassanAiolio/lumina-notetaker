@@ -53,6 +53,7 @@ async def ensure_indexes() -> None:
         await db.notes.create_index(
             [("title", "text"), ("raw_transcript", "text")], name="note_text"
         )
+        await db.slide_pages.create_index([("note_id", 1), ("page", 1)], name="note_page", unique=True)
         await db.users.create_index([("id", 1)], name="user_id_unique", unique=True)
         await db.users.create_index([("email", 1)], name="user_email_unique", unique=True)
         logger.info("MongoDB indexes ensured")

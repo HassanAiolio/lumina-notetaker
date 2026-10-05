@@ -67,7 +67,7 @@ const NoteRow = React.forwardRef(({ note, onOpen, onKeyDown }, ref) => {
 });
 NoteRow.displayName = 'NoteRow';
 
-export const NoteHistory = ({ refreshTrigger }) => {
+export const NoteHistory = ({ refreshTrigger, deck = null }) => {
   const [notes, setNotes] = useState([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
@@ -231,6 +231,7 @@ export const NoteHistory = ({ refreshTrigger }) => {
     return (
       <NoteReader
         initial={openNote}
+        deck={deck}
         position={openIndex >= 0 ? `${openIndex + 1} / ${total}` : ''}
         onBack={close}
         onPrev={prev ? () => open(prev.id) : null}

@@ -8,6 +8,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * it is unsupported, blocked, or fights the recorder for the microphone, it
  * disables itself quietly and nothing is lost.
  */
+// How much of the live caption is kept on screen.
+const CAPTION_CHARS = 600;
+
 export const useSpeechRecognition = () => {
   const [captions, setCaptions] = useState('');
   const [interim, setInterim] = useState('');
@@ -59,6 +62,9 @@ export const useSpeechRecognition = () => {
         recognition.lang = locale;
 
         recognition.onresult = (event) => {
+          // Hearing something means the session works; only consecutive
+          // failures should count towards giving up.
+          restartsRef.current = 0;
           let interimText = '';
           for (let i = event.resultIndex; i < event.results.length; i += 1) {
             const result = event.results[i];
@@ -68,7 +74,12 @@ export const useSpeechRecognition = () => {
               interimText += result[0].transcript;
             }
           }
-          setCaptions(finalRef.current);
+          // Only the tail is shown. Kept whole, two hours of captions grew to
+          // tens of thousands of characters, re-rendered on every word.
+          if (finalRef.current.length > CAPTION_CHARS * 2) {
+            finalRef.current = finalRef.current.slice(-CAPTION_CHARS);
+          }
+          setCaptions(finalRef.current.length > CAPTION_CHARS ? `…${finalRef.current.slice(-CAPTION_CHARS)}` : finalRef.current);
           setInterim(interimText);
         };
 

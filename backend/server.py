@@ -15,8 +15,8 @@ import uuid  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 
-from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Path as PathParam, Query, Request, UploadFile, status  # noqa: E402
+from fastapi.responses import JSONResponse, Response  # noqa: E402
 from pymongo.errors import PyMongoError  # noqa: E402
 from starlette.middleware.cors import CORSMiddleware  # noqa: E402
 
@@ -224,7 +224,8 @@ async def transcribe_audio(
 async def summarize_transcript(req: SummarizeRequest, user: User = Depends(current_user)):
     ratelimit.check(f"ai:{user.id}", *settings.RATE_LIMIT_AI)
 
-    result = await summarizer.summarize(req.transcript, req.language)
+    slides = [page.model_dump() for page in req.slides]
+    result = await summarizer.summarize(req.transcript, req.language, slides=slides)
     if result.get("degraded"):
         logger.warning(
             "Returned degraded notes to %s (%s)", user.email, result.get("degraded_reason")
@@ -328,7 +329,61 @@ async def delete_note(note_id: str, user: User = Depends(current_user)):
     result = await db.get_db().notes.delete_one({"id": note_id, "user_id": user.id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+    await db.get_db().slide_pages.delete_many({"note_id": note_id, "user_id": user.id})
     return {"message": "Note deleted", "id": note_id}
+
+
+# ── Slide pictures (the pages a note cites) ───────────────────────────────────
+# Kept apart from the note, so opening a note or listing them never carries
+# them; the reader fetches the one page asked for, and the browser keeps it.
+
+SLIDE_TYPES = {"image/jpeg", "image/webp", "image/png"}
+
+
+async def _own_note(note_id: str, user: User) -> dict:
+    note = await db.get_db().notes.find_one({"id": note_id, "user_id": user.id}, {"_id": 0, "id": 1})
+    if not note:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
+    return note
+
+
+@api.put("/notes/{note_id}/slides/{page}", status_code=status.HTTP_204_NO_CONTENT)
+async def put_slide_page(
+    request: Request,
+    note_id: str,
+    page: int = PathParam(ge=1, le=2000),
+    user: User = Depends(current_user),
+):
+    """Store the picture of one slide page, as the raw image body."""
+    ratelimit.check(f"write:{user.id}", *settings.RATE_LIMIT_WRITE)
+    await _own_note(note_id, user)
+
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type not in SLIDE_TYPES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A slide page must be a JPEG, WebP or PNG image")
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty image")
+    if len(data) > settings.MAX_SLIDE_IMAGE_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="That slide image is too large")
+
+    pages = db.get_db().slide_pages
+    key = {"note_id": note_id, "page": page, "user_id": user.id}
+    if not await pages.find_one(key, {"_id": 0, "page": 1}):
+        if await pages.count_documents({"note_id": note_id, "user_id": user.id}) >= settings.MAX_SLIDE_IMAGES:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This note already has as many slide pages as it can keep")
+    await pages.update_one(key, {"$set": {**key, "data": data, "type": content_type, "updated_at": _now()}}, upsert=True)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@api.get("/notes/{note_id}/slides/{page}")
+async def get_slide_page(note_id: str, page: int = PathParam(ge=1, le=2000), user: User = Depends(current_user)):
+    doc = await db.get_db().slide_pages.find_one({"note_id": note_id, "page": page, "user_id": user.id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="That slide page was not kept")
+    # The app asks with the deck's hash in the address, so a page never changes
+    # under a URL and the browser may keep it for good.
+    return Response(content=bytes(doc["data"]), media_type=doc["type"], headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
 @api.get("/tags", response_model=list[str])
@@ -381,6 +436,6 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )

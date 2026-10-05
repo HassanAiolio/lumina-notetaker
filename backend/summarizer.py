@@ -1,5 +1,6 @@
 """Turn a raw transcript into structured notes, in the transcript's own language."""
 import logging
+import math
 import re
 from collections import deque
 
@@ -174,6 +175,105 @@ are below - they are context only, never copy them into your answer:
 """
 
 
+_WORD = re.compile(r"[^\W\d_]{4,}", re.UNICODE)
+
+
+def _terms(text: str) -> set[str]:
+    return {word.lower() for word in _WORD.findall(text or "")}
+
+
+def pick_slides(slides: list[dict], window: str, budget: int) -> list[dict]:
+    """The slides a stretch of transcript is about, within `budget` characters.
+
+    A two hour lecture can come with eighty slides, far more than fits beside
+    each window, and a window only ever covers a few of them. Words the slide
+    and the window share pick them, each weighted by how rare it is across the
+    deck - "entropie" on four slides says more than "donc" on all of them.
+    Returned in page order, as they were shown.
+    """
+    if not slides or budget <= 0:
+        return []
+    window_terms = _terms(window)
+    per_slide = [(slide, _terms(slide["text"])) for slide in slides]
+    df: dict[str, int] = {}
+    for _, terms in per_slide:
+        for term in terms:
+            df[term] = df.get(term, 0) + 1
+    count = len(slides)
+    scored = []
+    for slide, terms in per_slide:
+        score = sum(math.log(1 + count / df[term]) for term in terms & window_terms)
+        if score > 1.0:
+            scored.append((score, slide))
+    scored.sort(key=lambda item: -item[0])
+    chosen, used = [], 0
+    for _, slide in scored:
+        cost = len(slide["text"]) + 12
+        if used + cost <= budget:
+            chosen.append(slide)
+            used += cost
+    return sorted(chosen, key=lambda slide: slide["page"])
+
+
+def _slides_clause(slides: list[dict]) -> str:
+    """The slides shown with this part of the lecture, and how to use them.
+
+    They are the lecture's own material, which is what makes them different
+    from the model's knowledge: a formula the teacher pointed at on a slide
+    was never in the audio, and here it can be written out - with its page.
+    """
+    if not slides:
+        return ""
+    pages = "\n".join(f"[p. {slide['page']}] {slide['text']}" for slide in slides)
+    return f"""
+Slides shown during the lecture, by page. They are the lecture's own material:
+{TRIPLE_QUOTE}
+{pages}
+{TRIPLE_QUOTE}
+- Use them to get terms, names, notation and formulas exactly right, and to
+  understand what is being explained. A formula or definition that is on a
+  slide may be written out in full, even where the speaker only pointed at it.
+- The notes still follow what was taught: leave out slide material the
+  speaker never came to.
+- When a bullet draws on a slide, end it with that page as [p. 12], or a span
+  as [p. 12-13]. Cite only the pages above.
+"""
+
+
+# What models write for a page reference, however they were asked. The space
+# in front is part of the match, so dropping a citation leaves no gap - and the
+# rest of the line, French spacing before colons included, is never touched.
+_CITATION = re.compile(
+    r"\s*[\[(]\s*(?:p(?:age)?s?\.?|diapo(?:sitive)?s?|slides?)\s*(\d{1,4})(?:\s*[-–—]\s*(\d{1,4}))?\s*[\])]",
+    re.IGNORECASE,
+)
+
+
+def tidy_citations(text: str, pages: set[int]) -> str:
+    """One form, "[p. 12]" or "[p. 12–13]", and only for pages that exist."""
+
+    def fix(match: re.Match) -> str:
+        first = int(match.group(1))
+        last = int(match.group(2)) if match.group(2) else first
+        if first not in pages:
+            return ""
+        if last != first and last in pages and last > first:
+            return f" [p. {first}–{last}]"
+        return f" [p. {first}]"
+
+    return _CITATION.sub(fix, text).strip()
+
+
+def cite_pages(result: dict, slides: list[dict]) -> dict:
+    """Tidy every page reference in a set of notes; drop the made-up ones."""
+    pages = {slide["page"] for slide in slides}
+    result["sections"] = {
+        key: [tidy_citations(bullet, pages) for bullet in bullets]
+        for key, bullets in result.get("sections", {}).items()
+    }
+    return result
+
+
 def build_prompt(
     transcript: str,
     language: str,
@@ -181,13 +281,14 @@ def build_prompt(
     content_type: str | None = None,
     part: tuple[int, int] | None = None,
     previous: str = "",
+    slides: list[dict] | None = None,
 ) -> str:
     return f"""Analyse the transcript below and produce structured notes.
 
 {_language_clause(language)}
 
 {_type_clause(content_type)}
-{_continuation_clause(part, previous)}
+{_continuation_clause(part, previous)}{_slides_clause(slides or [])}
 Return exactly this JSON shape:
 {{
   "title": "a short, specific title for these notes",
@@ -436,6 +537,8 @@ Rules:
   a term a bullet opens with, as **term**.
 - Keep any LaTeX between dollars exactly as the notes have it, backslashes
   doubled in the JSON.
+- Where a bullet says what a cited bullet in the notes says, keep its page
+  reference, as [p. 12], at the end.
 
 Notes:
 {TRIPLE_QUOTE}
@@ -675,6 +778,7 @@ async def summarize_in_windows(
     call,
     window_chars: int,
     min_window_chars: int,
+    slides: list[dict] | None = None,
 ) -> tuple[dict, int, int, Exception | None]:
     """Summarize window by window. Returns (merged, failed, total, last_error).
 
@@ -729,6 +833,9 @@ async def summarize_in_windows(
             content_type=first["type"] if first else None,
             part=(len(parts) + 1, len(parts) + len(pending) + 1),
             previous=notes_digest(parts, carry_budget),
+            # Only the slides this stretch is about, in room that shrinks with
+            # the window, so halving a refused window still makes it smaller.
+            slides=pick_slides(slides or [], window, min(settings.SLIDE_CONTEXT_CHARS, max(len(window) // 3, 1_500))),
         )
         try:
             answer = await call(prompt)
@@ -785,8 +892,13 @@ async def synthesize(merged: dict, language: str, *, call, budget: int) -> dict:
     return apply_synthesis(merged, parsed, language)
 
 
-async def summarize(transcript: str, language: str = languages.AUTO) -> dict:
+async def summarize(
+    transcript: str, language: str = languages.AUTO, slides: list[dict] | None = None
+) -> dict:
     """Structured notes for `transcript`, at any length.
+
+    `slides` is the lecture's deck as [{page, text}], when there is one: each
+    window sees the pages it is about, and the notes cite them as [p. N].
 
     Both providers summarize in windows and merge, so the detail does not thin
     out in the middle of a long recording. Gemini is primary; Groq is tried
@@ -834,6 +946,7 @@ async def summarize(transcript: str, language: str = languages.AUTO) -> dict:
                 call=call,
                 window_chars=window_chars,
                 min_window_chars=settings.MIN_WINDOW_CHARS,
+                slides=slides,
             )
         except (GeminiError, groq.GroqError) as exc:
             last_error = exc
@@ -847,7 +960,7 @@ async def summarize(transcript: str, language: str = languages.AUTO) -> dict:
 
         if merged and not failed:
             merged["degraded"] = False
-            return merged
+            return cite_pages(merged, slides or [])
 
         if merged and len(merged.get("sections", {})) > len(best.get("sections", {})):
             best, best_failed = merged, failed
@@ -859,7 +972,7 @@ async def summarize(transcript: str, language: str = languages.AUTO) -> dict:
         # flagged so nobody mistakes them for complete.
         best["degraded"] = True
         best["degraded_reason"] = "partial"
-        return best
+        return cite_pages(best, slides or [])
 
     logger.error("Every provider failed, using local extraction: %s", last_error)
     result = fallback_summary(transcript, language)

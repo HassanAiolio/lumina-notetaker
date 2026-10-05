@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
 import { LanguageSelect } from './LanguageSelect';
+import { SlidesPicker } from './Slides';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import {
@@ -67,6 +68,8 @@ export const Recorder = ({
   onDetectedLanguage,
   onTranscribed,
   onSessionChange,
+  deck,
+  onDeck,
   audioLevelRef,
 }) => {
   const [mode, setMode] = useState('voice');
@@ -442,6 +445,8 @@ export const Recorder = ({
             {label}
           </button>
         ))}
+
+        {onDeck && <SlidesPicker deck={deck} onDeck={onDeck} disabled={isSummarizing} />}
 
         <div className="ml-auto">
           <LanguageSelect

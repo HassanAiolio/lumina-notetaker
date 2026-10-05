@@ -188,14 +188,45 @@ export const transcribeChunk = async ({ blob, language = 'auto', context = '', s
 // legitimately runs for minutes. The default timeout would cut it off.
 export const SUMMARIZE_TIMEOUT_MS = 10 * 60 * 1000;
 
-export const summarizeTranscript = async (transcript, language = 'auto') =>
+// `slides` is the deck's text, [{page, text}], when one is attached.
+export const summarizeTranscript = async (transcript, language = 'auto', slides = []) =>
   (
     await client.post(
       '/notes/summarize',
-      { transcript, language },
+      { transcript, language, slides },
       { timeout: SUMMARIZE_TIMEOUT_MS },
     )
   ).data;
+
+/** Keep the picture of one cited slide page with a saved note. */
+export const putSlidePage = async (noteId, page, blob) =>
+  client.put(`/notes/${noteId}/slides/${page}`, blob, {
+    headers: { 'Content-Type': blob.type || 'image/jpeg' },
+  });
+
+// One object URL per page, for as long as the app is open: the reader asks
+// for the same pages again and again as people go back and forth.
+const slideUrls = new Map();
+
+/**
+ * A slide page kept with a note, as an object URL. The deck's hash is in the
+ * address so the browser can cache it for good: a different deck is a
+ * different address.
+ */
+export const getSlidePage = async (noteId, page, hash = '') => {
+  const key = `${noteId}/${page}/${hash}`;
+  if (!slideUrls.has(key)) {
+    const request = client
+      .get(`/notes/${noteId}/slides/${page}`, { params: hash ? { v: hash } : {}, responseType: 'blob' })
+      .then((response) => URL.createObjectURL(response.data))
+      .catch((err) => {
+        slideUrls.delete(key);
+        throw err;
+      });
+    slideUrls.set(key, request);
+  }
+  return slideUrls.get(key);
+};
 
 export const saveNote = async (note) => (await client.post('/notes', note)).data;
 

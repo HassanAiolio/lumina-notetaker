@@ -117,6 +117,11 @@ class FakeCollection:
                 return {k: v for k, v in doc.items() if k != "_id"}
         return None
 
+    async def delete_many(self, query):
+        before = len(self.docs)
+        self.docs = [d for d in self.docs if not _matches(d, query)]
+        return type("Result", (), {"deleted_count": before - len(self.docs)})()
+
     async def update_one(self, query, update, upsert=False):
         for doc in self.docs:
             if _matches(doc, query):
@@ -149,6 +154,7 @@ class FakeDatabase:
     def __init__(self):
         self.notes = FakeCollection()
         self.users = FakeCollection()
+        self.slide_pages = FakeCollection()
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -373,3 +379,76 @@ def test_a_blank_rename_is_ignored(client):
     assert client.patch(f"/api/notes/{note['id']}", json={"title": "   "}).status_code == 400
     renamed = client.patch(f"/api/notes/{note['id']}", json={"title": "  Thermo, cours 3 "}).json()
     assert renamed["title"] == "Thermo, cours 3"
+
+
+# ── Slides kept with a note ───────────────────────────────────────────────────
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 2000
+
+
+def test_a_note_keeps_the_pictures_of_the_pages_it_cites(client):
+    note = make_note(client, slides={"name": "Cours 3.pdf", "pages": 40, "cited": [12, 3, 12], "hash": "abc"})
+    assert note["slides"] == {"name": "Cours 3.pdf", "pages": 40, "cited": [3, 12], "hash": "abc"}
+
+    put = client.put(f"/api/notes/{note['id']}/slides/12", content=JPEG, headers={"Content-Type": "image/jpeg"})
+    assert put.status_code == 204
+    got = client.get(f"/api/notes/{note['id']}/slides/12")
+    assert got.status_code == 200
+    assert got.content == JPEG
+    assert got.headers["content-type"] == "image/jpeg"
+    assert "immutable" in got.headers["cache-control"]
+    assert client.get(f"/api/notes/{note['id']}/slides/13").status_code == 404
+
+
+def test_slide_pictures_are_private_to_the_note_owner(client):
+    note = make_note(client)
+    client.put(f"/api/notes/{note['id']}/slides/1", content=JPEG, headers={"Content-Type": "image/jpeg"})
+
+    as_user(BOB)
+    assert client.get(f"/api/notes/{note['id']}/slides/1").status_code == 404
+    assert client.put(
+        f"/api/notes/{note['id']}/slides/2", content=JPEG, headers={"Content-Type": "image/jpeg"}
+    ).status_code == 404
+
+
+def test_only_images_of_a_sensible_size_are_kept(client):
+    note = make_note(client)
+    url = f"/api/notes/{note['id']}/slides/1"
+    assert client.put(url, content=b"<svg/>", headers={"Content-Type": "image/svg+xml"}).status_code == 400
+    big = b"0" * (server.settings.MAX_SLIDE_IMAGE_BYTES + 1)
+    assert client.put(url, content=big, headers={"Content-Type": "image/jpeg"}).status_code == 413
+
+
+def test_deleting_a_note_deletes_its_slide_pictures(client, fake_db):
+    note = make_note(client)
+    client.put(f"/api/notes/{note['id']}/slides/1", content=JPEG, headers={"Content-Type": "image/jpeg"})
+    assert len(fake_db.slide_pages.docs) == 1
+    client.delete(f"/api/notes/{note['id']}")
+    assert fake_db.slide_pages.docs == []
+
+
+def test_summarize_hands_the_slides_on(client, monkeypatch):
+    seen = {}
+
+    async def fake_summarize(transcript, language, slides=None):
+        seen["slides"] = slides
+        return {"title": "T", "type": "LECTURE", "language": "fr", "sections": {}, "labels": {}}
+
+    monkeypatch.setattr(server.summarizer, "summarize", fake_summarize)
+    response = client.post("/api/notes/summarize", json={
+        "transcript": "Un cours.", "language": "fr",
+        "slides": [{"page": 1, "text": "  Titre   du cours "}, {"page": 2, "text": ""}],
+    })
+    assert response.status_code == 200
+    assert seen["slides"] == [{"page": 1, "text": "Titre du cours"}]  # blank pages dropped, text tidied
+
+
+def test_regenerated_notes_rewrite_the_same_note(client):
+    note = make_note(client)
+    changes = {"sections": {"overview": ["Nouveau"]}, "type": "LECTURE", "language": "fr", "degraded": False,
+               "raw_transcript": "Texte revu", "slides": {"name": "c.pdf", "pages": 3, "cited": [2]}}
+    updated = client.patch(f"/api/notes/{note['id']}", json=changes).json()
+    assert updated["sections"] == {"overview": ["Nouveau"]}
+    assert updated["raw_transcript"] == "Texte revu"
+    assert updated["slides"]["cited"] == [2]
+    assert client.get("/api/notes").json()["total"] == 1

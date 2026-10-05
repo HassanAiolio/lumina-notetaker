@@ -7,7 +7,7 @@
  * exactly as written rather than silently eaten.
  */
 import {
-  buildDeck, groupByDate, inlineRuns, mathParts, noteCounts, notePreview, splitQuestion, stripInline,
+  buildDeck, citedPages, groupByDate, inlineRuns, mathParts, noteCounts, notePreview, splitQuestion, stripInline,
 } from './notes';
 
 const plain = (text) => inlineRuns(text).map((r) => r.text).join('');
@@ -149,5 +149,23 @@ describe('LaTeX in bullets', () => {
 
   it('keeps the dollars when formatting is stripped, so copied notes stay LaTeX', () => {
     expect(stripInline('**Limite** : $\frac{1}{n}$')).toBe('Limite : $\frac{1}{n}$');
+  });
+});
+
+describe('slide citations', () => {
+  it('reads [p. 12] and [p. 4–5] as page references', () => {
+    const runs = inlineRuns('**Carnot** : $\\eta = 1 - T_f/T_c$ [p. 4–5]');
+    expect(runs.find((run) => run.cite)).toMatchObject({ page: 4, last: 5 });
+    expect(runs.find((run) => run.math)).toBeTruthy();
+    expect(inlineRuns('Voir [p. 12]').find((run) => run.cite)).toMatchObject({ page: 12, last: 12 });
+  });
+
+  it('leaves other brackets alone', () => {
+    expect(inlineRuns('Un intervalle [0, 1] et [p12]').some((run) => run.cite)).toBe(false);
+  });
+
+  it('collects every cited page, spans included, once each', () => {
+    const note = { sections: { a: ['x [p. 2]', 'y [p. 4–6]'], b: ['z [p. 2]'] } };
+    expect(citedPages(note)).toEqual([2, 4, 5, 6]);
   });
 });

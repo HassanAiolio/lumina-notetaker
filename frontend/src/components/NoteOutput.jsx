@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Check, ChevronDown, Copy, Plus, TriangleAlert, X } from 'lucide-react';
 import { ExportButton } from './ExportButton';
@@ -40,8 +40,12 @@ const Section = ({ sectionKey, label, items, copied, onCopy }) => (
   </div>
 );
 
-export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
+export const NoteOutput = ({ note, onSave, onClose, onOpenSaved, isSaving, saved }) => {
   const [tags, setTags] = useState(note?.tags || []);
+  // Another note in the same place (regenerated, or the next recording)
+  // brings its own tags.
+  useEffect(() => setTags(note?.tags || []), [note?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const tagsChanged = tags.join('\n') !== (note?.tags || []).join('\n');
   const [tagInput, setTagInput] = useState('');
   const [copiedKey, setCopiedKey] = useState('');
   const [showTranscript, setShowTranscript] = useState(false);
@@ -211,9 +215,10 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
           whileHover={{ scale: saved ? 1 : 1.02 }}
           whileTap={{ scale: saved ? 1 : 0.98 }}
           onClick={() => onSave({ ...note, tags })}
-          disabled={isSaving || saved}
+          // Notes save themselves; this is for the tags added since, or a retry.
+          disabled={isSaving || (saved && !tagsChanged)}
           className={`px-6 py-2.5 rounded-full text-sm font-semibold transition-colors duration-300 ${
-            saved
+            saved && !tagsChanged
               ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'
               : 'bg-violet-600 hover:bg-violet-500 text-white shadow-[0_0_20px_-5px_rgba(124,58,237,0.4)]'
           }`}
@@ -221,14 +226,26 @@ export const NoteOutput = ({ note, onSave, onClose, isSaving, saved }) => {
         >
           {isSaving ? (
             'Saving…'
-          ) : saved ? (
+          ) : saved && !tagsChanged ? (
             <span className="flex items-center gap-1.5">
               <Check size={14} /> Saved
             </span>
+          ) : saved ? (
+            'Save tags'
           ) : (
             'Save note'
           )}
         </motion.button>
+
+        {saved && note.id && onOpenSaved && (
+          <button
+            onClick={() => onOpenSaved(note.id)}
+            className="px-4 py-2.5 rounded-full text-sm font-medium text-zinc-300 hover:text-white transition-colors"
+            data-testid="open-saved-btn"
+          >
+            Open in Notes →
+          </button>
+        )}
 
         <ExportButton note={{ ...note, tags }} />
 

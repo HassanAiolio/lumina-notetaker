@@ -2,12 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion';
 import {
   ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, FileText, GraduationCap,
-  Loader2, Pencil, Plus, Trash2, TriangleAlert, X,
+  Loader2, Pencil, Plus, Presentation, Trash2, TriangleAlert, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { BulletText } from './BulletText';
 import { ExportButton } from './ExportButton';
 import { ReviseDeck } from './ReviseDeck';
+import { SlidesProvider, useSlides } from './Slides';
 import { deleteNote, errorMessage, getNote, updateNote } from '../services/api';
 import {
   isDisplayMath, languageName, noteCounts, noteToMarkdown, sectionEntries, sectionLabel,
@@ -31,8 +32,29 @@ const longDate = (iso) => {
  * Opened from the library with only what a listing carries; the whole note,
  * transcript included, is fetched here.
  */
+/** "Slides: Cours 3.pdf · 6 pages cited", opening the first of them. */
+const SlidesLine = ({ slides }) => {
+  const viewer = useSlides();
+  if (!slides?.name) return null;
+  const cited = slides.cited?.length || 0;
+  const label = `${slides.name}${cited ? ` · ${cited} page${cited > 1 ? 's' : ''} cited` : ''}`;
+  return viewer?.available && cited ? (
+    <button
+      onClick={() => viewer.open(slides.cited[0])}
+      className="flex items-center gap-1.5 text-violet-300/90 hover:text-violet-200 transition-colors"
+      data-testid="reader-slides"
+    >
+      <Presentation size={12} /> {label}
+    </button>
+  ) : (
+    <span className="flex items-center gap-1.5">
+      <Presentation size={12} /> {label}
+    </span>
+  );
+};
+
 export const NoteReader = ({
-  initial, position, onBack, onPrev, onNext, onUpdated, onDeleted,
+  initial, position, onBack, onPrev, onNext, onUpdated, onDeleted, deck = null,
 }) => {
   const [note, setNote] = useState(initial);
   const [complete, setComplete] = useState(false);
@@ -158,6 +180,7 @@ export const NoteReader = ({
   const language = languageName(note.language);
 
   return (
+    <SlidesProvider deck={deck} note={note}>
     <motion.article
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
@@ -242,6 +265,7 @@ export const NoteReader = ({
           <span>
             {counts.points} points{counts.cards > 0 && ` · ${counts.cards} cards`}
           </span>
+          <SlidesLine slides={note.slides} />
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
@@ -424,5 +448,6 @@ export const NoteReader = ({
         </div>
       </div>
     </motion.article>
+    </SlidesProvider>
   );
 };

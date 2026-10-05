@@ -9,14 +9,21 @@ import { SignIn } from './components/SignIn';
 import { UserMenu } from './components/UserMenu';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useAuth } from './contexts/AuthContext';
-import { errorMessage, saveNote, summarizeTranscript } from './services/api';
+import { SlidesProvider } from './components/Slides';
+import { errorMessage, putSlidePage, saveNote, summarizeTranscript, updateNote } from './services/api';
+import { citedPages } from './lib/notes';
 import './App.css';
 
 const Scene3D = lazy(() =>
   import('./components/Canvas3D/Scene3D').then((module) => ({ default: module.Scene3D })),
 );
 
-const DRAFT_KEY = 'lumina.draft';
+export const DRAFT_KEY = 'lumina.draft';
+
+// What a note is saved with. The rest of the object on screen is for the
+// screen only (why the AI fell short, say).
+const SAVED_FIELDS = ['title', 'type', 'language', 'sections', 'labels', 'raw_transcript', 'tags', 'degraded', 'source', 'slides'];
+const savedPart = (note) => Object.fromEntries(SAVED_FIELDS.filter((key) => note[key] !== undefined).map((key) => [key, note[key]]));
 const LANGUAGE_KEY = 'lumina.language';
 
 const readStored = (key, fallback = '') => {
@@ -62,6 +69,8 @@ function Workspace() {
     window.location.hash.startsWith('#note=') ? 'history' : 'record',
   );
   const [isOnline, setIsOnline] = useState(() => navigator.onLine !== false);
+  // The lecture's slides (PDF), read in the browser, for this session.
+  const [deck, setDeck] = useState(null);
 
   const airplaneTimerRef = useRef(null);
   const noteRef = useRef(null);
@@ -103,6 +112,42 @@ function Workspace() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [transcript, savedCurrent]);
 
+  /** Pictures of the cited slide pages, kept with the note so it can show them anywhere. */
+  const keepSlides = useCallback(async (saved, source) => {
+    const pages = saved.slides?.cited || [];
+    if (!source || !pages.length || saved.slides?.hash !== source.hash) return;
+    let failed = 0;
+    for (const page of pages) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await putSlidePage(saved.id, page, await source.render(page));
+      } catch (err) {
+        failed += 1;
+      }
+    }
+    if (failed) toast.warning(`${failed} slide page${failed > 1 ? 's' : ''} could not be kept with the note.`);
+  }, []);
+
+  /** Save a note the first time, then rewrite the same one. */
+  const persistNote = useCallback(
+    async (note, { quiet = false } = {}) => {
+      setIsSaving(true);
+      try {
+        const saved = note.id ? await updateNote(note.id, savedPart(note)) : await saveNote(savedPart(note));
+        setCurrentNote((current) => ({ ...current, ...saved, degraded_reason: current?.degraded_reason }));
+        setSavedCurrent(true);
+        setRefreshTrigger((value) => value + 1);
+        if (!quiet) toast.success('Note saved');
+        keepSlides(saved, deck);
+      } catch (err) {
+        toast.error(errorMessage(err, 'Could not save that note. It is still here — try Save again.'));
+      } finally {
+        setIsSaving(false);
+      }
+    },
+    [deck, keepSlides],
+  );
+
   // `override` carries a transcript that has only just been written: a
   // recording that finished transcribing goes straight on to notes, before
   // the state holding it has re-rendered.
@@ -118,19 +163,29 @@ function Workspace() {
     setSavedCurrent(false);
     try {
       const summaryLanguage = language === 'auto' ? heard || 'auto' : language;
-      const result = await summarizeTranscript(text, summaryLanguage);
-      setCurrentNote({
+      const slidesText = deck ? deck.pages.filter((page) => page.text) : [];
+      const result = await summarizeTranscript(text, summaryLanguage, slidesText);
+      const note = {
+        // Regenerating rewrites the note already saved, keeping its tags.
+        id: currentNote?.id,
+        tags: currentNote?.tags || [],
         title: result.title,
         type: result.type || '',
         language: result.language || heard || language,
         sections: result.sections || {},
         labels: result.labels || {},
         raw_transcript: text,
-        tags: [],
         degraded: !!result.degraded,
         degraded_reason: result.degraded_reason || null,
         source: 'voice',
-      });
+      };
+      if (deck) {
+        note.slides = { name: deck.name, pages: deck.pageCount, hash: deck.hash, cited: citedPages(note) };
+      }
+      setCurrentNote(note);
+      // Saved straight away: notes that only existed on screen were lost to a
+      // closed tab, and making them again costs a scarce AI request.
+      persistNote(note, { quiet: true });
 
       if (result.degraded) {
         toast.warning('The AI was unavailable — notes were structured locally.');
@@ -147,21 +202,13 @@ function Workspace() {
     } finally {
       setIsSummarizing(false);
     }
-  }, [transcript, language, detectedLanguage]);
+  }, [transcript, language, detectedLanguage, deck, currentNote, persistNote]);
 
-  const handleSave = useCallback(async (note) => {
-    setIsSaving(true);
-    try {
-      await saveNote(note);
-      setSavedCurrent(true);
-      setCurrentNote(note);
-      setRefreshTrigger((value) => value + 1);
-      toast.success('Note saved to your account');
-    } catch (err) {
-      toast.error(errorMessage(err, 'Could not save that note.'));
-    } finally {
-      setIsSaving(false);
-    }
+  const handleSave = useCallback((note) => persistNote(note), [persistNote]);
+
+  const openSaved = useCallback((id) => {
+    window.location.hash = `#note=${encodeURIComponent(id)}`;
+    setActiveTab('history');
   }, []);
 
   const handleCloseOutput = useCallback(() => {
@@ -302,6 +349,8 @@ function Workspace() {
                       onSummarize={() => handleSummarize()}
                       onTranscribed={handleSummarize}
                       onSessionChange={setSessionActive}
+                      deck={deck}
+                      onDeck={setDeck}
                       onRecordingChange={setIsRecording}
                       onTranscribingChange={setIsTranscribing}
                       onDetectedLanguage={setDetectedLanguage}
@@ -312,13 +361,16 @@ function Workspace() {
                   <div ref={noteRef}>
                     <AnimatePresence>
                       {currentNote && (
-                        <NoteOutput
-                          note={currentNote}
-                          onSave={handleSave}
-                          onClose={handleCloseOutput}
-                          isSaving={isSaving}
-                          saved={savedCurrent}
-                        />
+                        <SlidesProvider deck={deck} note={currentNote}>
+                          <NoteOutput
+                            note={currentNote}
+                            onSave={handleSave}
+                            onClose={handleCloseOutput}
+                            onOpenSaved={openSaved}
+                            isSaving={isSaving}
+                            saved={savedCurrent}
+                          />
+                        </SlidesProvider>
                       )}
                     </AnimatePresence>
                   </div>
@@ -343,7 +395,7 @@ function Workspace() {
                       Private to your account. Search, filter and export anything you have saved.
                     </p>
                   </div>
-                  <NoteHistory refreshTrigger={refreshTrigger} />
+                  <NoteHistory refreshTrigger={refreshTrigger} deck={deck} />
                 </motion.div>
               )}
             </AnimatePresence>

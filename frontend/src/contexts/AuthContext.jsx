@@ -58,6 +58,15 @@ export const AuthProvider = ({ children }) => {
 
   const signOut = useCallback(() => {
     tokenStore.clear();
+    // The unsaved transcript belongs to whoever just left. On a shared
+    // computer - a library, a lecture hall - the next person to sign in would
+    // otherwise find it waiting for them. (A session that merely expired keeps
+    // it: that is the same person, about to sign back in.)
+    try {
+      window.localStorage.removeItem('lumina.draft');
+    } catch (err) {
+      /* storage unavailable */
+    }
     setUser(null);
     try {
       window.google?.accounts?.id?.disableAutoSelect();

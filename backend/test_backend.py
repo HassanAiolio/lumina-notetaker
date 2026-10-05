@@ -943,3 +943,67 @@ def test_the_prompt_asks_for_latex_but_not_for_formulas_that_were_not_said():
     assert r"$\lim_{n \to +\infty} \frac{1}{n} = 0$" in prompt
     assert "name it instead" in prompt
     assert "\t" not in prompt and "\f" not in prompt  # the example itself is not mangled
+
+
+# -- Slides -------------------------------------------------------------------------
+
+DECK = [
+    {"page": 1, "text": "Thermodynamique - Chapitre 3"},
+    {"page": 2, "text": "Entropie : fonction d'état, dS = δQ_rév / T, entropie d'un système isolé"},
+    {"page": 3, "text": "Machines thermiques : rendement de Carnot η = 1 − T_froide / T_chaude"},
+    {"page": 4, "text": "Exercices : calorimétrie et changements de phase"},
+]
+
+
+def test_a_window_is_shown_the_slides_it_is_about():
+    window = "On définit maintenant l'entropie. L'entropie d'un système isolé ne peut que croître."
+    picked = summarizer.pick_slides(DECK, window, 4_000)
+    assert [slide["page"] for slide in picked] == [2]
+
+
+def test_slides_are_kept_within_their_budget_and_in_page_order():
+    window = "entropie rendement Carnot machines thermiques entropie système"
+    picked = summarizer.pick_slides(DECK, window, 4_000)
+    assert [slide["page"] for slide in picked] == [2, 3]
+    tight = summarizer.pick_slides(DECK, window, 90)
+    assert len(tight) == 1
+
+
+def test_citations_take_one_form_and_made_up_pages_go():
+    pages = {2, 3}
+    assert summarizer.tidy_citations("**Entropie** : fonction d'état (diapo 2)", pages) == "**Entropie** : fonction d'état [p. 2]"
+    assert summarizer.tidy_citations("Rendement [p.3-2]", pages) == "Rendement [p. 3]"
+    assert summarizer.tidy_citations("Les deux [slides 2-3].", pages) == "Les deux [p. 2–3]."
+    assert summarizer.tidy_citations("Inventé [p. 40] : non", pages) == "Inventé : non"
+
+
+def test_the_prompt_carries_the_relevant_slides_only_when_there_are_some():
+    with_slides = summarizer.build_prompt("x", "fr", slides=[DECK[1]])
+    assert "[p. 2] Entropie" in with_slides
+    assert "may be written out in full" in with_slides
+    assert "Slides shown" not in summarizer.build_prompt("x", "fr")
+
+
+async def test_notes_made_with_slides_cite_real_pages_only(monkeypatch):
+    prompts = []
+
+    async def gemini_answer(parts, **_k):
+        prompts.append(parts[0]["text"])
+        return json.dumps({"title": "T", "type": "LECTURE", "language": "fr", "sections": {
+            "definitions": ["**Entropie** : fonction d'état [p. 2]", "**Inventé** : rien [p. 99]"]}, "labels": {}})
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+    result = await summarizer.summarize("On parle de l'entropie d'un système isolé.", "fr", slides=DECK)
+
+    assert "[p. 2] Entropie" in prompts[0]
+    assert result["sections"]["definitions"] == ["**Entropie** : fonction d'état [p. 2]", "**Inventé** : rien"]
+
+
+async def test_without_slides_no_page_reference_survives(monkeypatch):
+    async def gemini_answer(parts, **_k):
+        return json.dumps({"title": "T", "type": "LECTURE", "language": "fr",
+                           "sections": {"definitions": ["**A** : b [p. 4]"]}, "labels": {}})
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+    result = await summarizer.summarize("Un cours.", "fr")
+    assert result["sections"]["definitions"] == ["**A** : b"]

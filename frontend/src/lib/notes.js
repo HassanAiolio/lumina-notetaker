@@ -118,8 +118,26 @@ export const downloadMarkdown = (note) => {
  * formula is full of are never read as emphasis. A dollar that opens or
  * closes against a space ("50 $") is a price, not maths.
  */
-const INLINE_PATTERN = /(\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$|\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|(?<![*\w])\*[^*\n]+\*(?!\w)|(?<![_\w])_[^_\n]+_(?!\w))/g;
+const INLINE_PATTERN = /(\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$|\[p\. \d{1,4}(?:–\d{1,4})?\]|\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|(?<![*\w])\*[^*\n]+\*(?!\w)|(?<![_\w])_[^_\n]+_(?!\w))/g;
 const MATH_PATTERN = /(\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$)/;
+
+const CITATION = /^\[p\. (\d{1,4})(?:–(\d{1,4}))?\]$/;
+const CITATIONS = /\[p\. (\d{1,4})(?:–(\d{1,4}))?\]/g;
+
+/** Every slide page a note cites, in order: what gets kept with the note. */
+export const citedPages = (note) => {
+  const pages = new Set();
+  sectionEntries(note).forEach(([, items]) =>
+    items.forEach((item) => {
+      for (const match of String(item).matchAll(CITATIONS)) {
+        const first = Number(match[1]);
+        const last = Number(match[2] || match[1]);
+        for (let page = first; page <= Math.min(last, first + 5); page += 1) pages.add(page);
+      }
+    }),
+  );
+  return [...pages].sort((a, b) => a - b);
+};
 
 const isMath = (piece) => piece.length > 2 && piece.startsWith('$') && piece.endsWith('$');
 
@@ -155,8 +173,12 @@ export const inlineRuns = (text) => {
     index += 1;
     // Only a stretch the pattern matched (odd positions) can be maths: plain
     // text that merely starts and ends with a dollar stays text.
+    const cite = position % 2 ? CITATION.exec(piece) : null;
     if (position % 2 && isMath(piece)) {
       runs.push(mathRun(piece, index));
+    } else if (cite) {
+      // A slide page the bullet draws on: "[p. 12]" or "[p. 12–13]".
+      runs.push({ key: index, text: piece, cite: true, page: Number(cite[1]), last: Number(cite[2] || cite[1]) });
     } else if (piece.startsWith('**') && piece.endsWith('**')) {
       runs.push({ key: index, text: piece.slice(2, -2), bold: true });
     } else if (piece.startsWith('__') && piece.endsWith('__')) {

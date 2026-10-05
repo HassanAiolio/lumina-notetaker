@@ -375,6 +375,30 @@ The default model is `large-v3-turbo`; `--model large-v3` is more accurate on ha
 several times slower, and `--model small` suits a machine with no usable GPU. Note this is a
 local tool, not something the deployed backend can do — a free Render instance has no GPU.
 
+### Lecture slides
+
+Attach the lecture's PDF (the **Slides** button next to Voice/Text) and the
+notes are made with it. pdf.js reads the deck in the browser, so the file never
+crosses the metered backend: only each page's text goes along with the
+transcript, and each summary window is shown the few pages that share its
+vocabulary (rare words weigh more). The slides supply exact terms, notation and
+the formulas that were on the board, which the audio never contained; a bullet
+that draws on one ends with `[p. 12]`, invented page numbers are dropped, and
+the chip opens the page.
+
+When the note is saved, pictures of the cited pages only are kept with it (a
+separate `slide_pages` collection, never sent with a listing), so the reader can
+show them on any device. Pages are served with an immutable cache header and the
+deck's hash in the URL.
+
+### Security headers
+
+`frontend/vercel.json` sets a Content-Security-Policy, `X-Frame-Options`,
+`nosniff`, a referrer policy and caching for the 3D model. The CSP allows the
+backend and Worker by their hosting domains (`*.onrender.com`,
+`*.workers.dev`); moving either to a custom domain means adding it to
+`connect-src`, or the app cannot reach it.
+
 ### The 3D scene: one rig, baked in Blender
 
 The notebook, the pen and the paper airplane are a single rigged model,

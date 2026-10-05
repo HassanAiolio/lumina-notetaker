@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { inlineRuns, mathParts, splitQuestion } from '../lib/notes';
+import { SlideChip } from './Slides';
 
 // KaTeX is fetched the first time a note has maths in it, never before: most
 // notes have none, and it is the largest thing the notes views could load.
@@ -76,6 +77,8 @@ export const InlineText = ({ text, promote = false }) =>
   inlineRuns(text).map((run, index, runs) =>
     run.math ? (
       <MathText key={run.key} tex={run.tex} display={run.display || (promote && runs.length === 1)} />
+    ) : run.cite ? (
+      <SlideChip key={run.key} page={run.page} last={run.last} />
     ) : run.bold ? (
       <strong key={run.key} className="font-semibold text-zinc-100">
         <WithMath text={run.text} />
