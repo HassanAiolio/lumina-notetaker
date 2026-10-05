@@ -7,7 +7,7 @@
  * exactly as written rather than silently eaten.
  */
 import {
-  buildDeck, groupByDate, inlineRuns, noteCounts, notePreview, splitQuestion, stripInline,
+  buildDeck, groupByDate, inlineRuns, mathParts, noteCounts, notePreview, splitQuestion, stripInline,
 } from './notes';
 
 const plain = (text) => inlineRuns(text).map((r) => r.text).join('');
@@ -118,5 +118,36 @@ describe('library helpers', () => {
       ['This week', 1],
     ]);
     expect(groups).toHaveLength(4);
+  });
+});
+
+describe('LaTeX in bullets', () => {
+  it('reads $...$ as maths, underscores and all', () => {
+    const runs = inlineRuns('**Suite** : $u_{n+1} = u_n * q$ pour tout _n_');
+    const math = runs.find((run) => run.math);
+    expect(math).toMatchObject({ tex: 'u_{n+1} = u_n * q', display: false });
+    expect(runs.find((run) => run.italic)?.text).toBe('n');
+  });
+
+  it('reads $$...$$ as a displayed equation', () => {
+    expect(inlineRuns('$$\sum_{k=0}^{n} k = \frac{n(n+1)}{2}$$')[0]).toMatchObject({
+      math: true,
+      display: true,
+      tex: '\sum_{k=0}^{n} k = \frac{n(n+1)}{2}',
+    });
+  });
+
+  it('leaves prices alone', () => {
+    expect(inlineRuns('Entre 50 $ et 80 $').some((run) => run.math)).toBe(false);
+  });
+
+  it('finds maths inside a bold term', () => {
+    const parts = mathParts('Rendement $\eta$ de Carnot');
+    expect(parts.map((part) => !!part.math)).toEqual([false, true, false]);
+    expect(parts[1].tex).toBe('\eta');
+  });
+
+  it('keeps the dollars when formatting is stripped, so copied notes stay LaTeX', () => {
+    expect(stripInline('**Limite** : $\frac{1}{n}$')).toBe('Limite : $\frac{1}{n}$');
   });
 });

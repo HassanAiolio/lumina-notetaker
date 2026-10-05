@@ -30,6 +30,11 @@ const HOME_Z = -0.4;
 // a lectern, which shows the page and gives the pen room to move.
 const TILT = 0.92;
 
+// How much larger the pen is while it follows the cursor.
+const FREE_PEN_SCALE = 1.45;
+// The pen's barrel, nib to cap, in its own space (Blender's +Z, exported as +Y).
+const BARREL = new THREE.Vector3(0, 1, 0);
+
 /** Frame-rate independent easing: the fraction to move this frame. */
 const approach = (rate, delta) => 1 - Math.exp(-rate * delta);
 
@@ -262,6 +267,7 @@ export function createDeskScene(canvas, options = {}) {
 
       planeRoot = model.getObjectByName('AirplaneRoot');
       if (planeRoot) planeRoot.visible = false;
+      pen = model.getObjectByName('Pen');
       const inPlane = (object) => {
         for (let o = object; o; o = o.parent) if (o === planeRoot) return true;
         return false;
@@ -317,9 +323,98 @@ export function createDeskScene(canvas, options = {}) {
 
   // ── Per frame ─────────────────────────────────────────────────────────
   const pointer = new THREE.Vector2();
+  let pointerSeen = false;
   let elapsed = 0;
   let smoothedLevel = 0;
   let focus = 0;
+
+  // ── The free pen ──────────────────────────────────────────────────────
+  // While nothing is being written the pen leaves the rig and follows the
+  // cursor, nib towards the book. `attach` blends it back into the baked
+  // clip: 0 is free, 1 is exactly where the clip puts it. Starting to write
+  // raises it as to_book carries the pen to the page, so the pen flies from
+  // the cursor to line one; after writing it eases back out to the cursor.
+  let pen = null;
+  let attach = 1;
+  let freeReady = false;
+  const raycaster = new THREE.Raycaster();
+  const pointerPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -1.1); // z = 1.1, in front of the book
+  const hit = new THREE.Vector3();
+  const freeTarget = new THREE.Vector3();
+  const freePos = new THREE.Vector3();
+  const previousFree = new THREE.Vector3();
+  const freeQuat = new THREE.Quaternion();
+  const bookWorld = new THREE.Vector3();
+  const aimer = new THREE.Object3D();
+  const away = new THREE.Vector3();
+  const tilt = { x: 0, z: 0 };
+  const lean = new THREE.Quaternion();
+  const leanEuler = new THREE.Euler();
+  const parentInverse = new THREE.Matrix4();
+  const parentQuat = new THREE.Quaternion();
+  const localPos = new THREE.Vector3();
+  const localQuat = new THREE.Quaternion();
+  const clipPos = new THREE.Vector3();
+  const clipQuat = new THREE.Quaternion();
+
+  const steerPen = (delta) => {
+    if (!pen) return;
+    const free = pointerSeen && !reducedMotion && mode === 'idle';
+    // Snapping to the page is quick, drifting back out to the cursor is not.
+    attach += ((free ? 0 : 1) - attach) * approach(free ? 1.4 : 3.2, delta);
+    if (!free && attach > 0.995) attach = 1;
+
+    // The free pose is kept up to date even while attached, so letting go
+    // starts from wherever the cursor is now.
+    if (!freeReady) {
+      pen.getWorldPosition(freePos);
+      pen.getWorldQuaternion(freeQuat);
+      freeTarget.copy(freePos);
+      freeReady = true;
+    }
+    raycaster.setFromCamera(pointer, camera);
+    if (raycaster.ray.intersectPlane(pointerPlane, hit)) freeTarget.copy(hit);
+    previousFree.copy(freePos);
+    // A held pen is never quite still.
+    hit.copy(freeTarget).setY(freeTarget.y + Math.sin(elapsed * 1.6) * 0.03);
+    freePos.lerp(hit, approach(4, delta));
+
+    // Nib towards the book: the barrel - the pen's +Y once exported - points
+    // away from it. Mostly across the screen, so the pen reads like a
+    // compass needle instead of pointing end-on at the camera.
+    desk.getWorldPosition(bookWorld);
+    away.copy(freePos).sub(bookWorld);
+    away.z *= 0.25;
+    if (away.lengthSq() < 1e-6) away.set(0, 1, 0);
+    aimer.quaternion.setFromUnitVectors(BARREL, away.normalize());
+    // Leaning into the motion, as the old pen did.
+    const vx = (freePos.x - previousFree.x) / Math.max(delta, 1e-3);
+    const vy = (freePos.y - previousFree.y) / Math.max(delta, 1e-3);
+    tilt.z += (THREE.MathUtils.clamp(-vx * 0.3, -0.35, 0.35) - tilt.z) * approach(6, delta);
+    tilt.x += (THREE.MathUtils.clamp(vy * 0.3, -0.35, 0.35) - tilt.x) * approach(6, delta);
+    aimer.quaternion.premultiply(lean.setFromEuler(leanEuler.set(tilt.x, 0, tilt.z)));
+    freeQuat.slerp(aimer.quaternion, approach(6, delta));
+
+    if (attach >= 1) {
+      pen.scale.setScalar(1);
+      return;
+    }
+    // Blend in the pen's own parent space, so the rig's scale and tilt hold.
+    const parent = pen.parent;
+    parent.updateWorldMatrix(true, false);
+    parentInverse.copy(parent.matrixWorld).invert();
+    localPos.copy(freePos).applyMatrix4(parentInverse);
+    parent.getWorldQuaternion(parentQuat);
+    localQuat.copy(parentQuat).invert().multiply(freeQuat);
+    const k = attach * attach * (3 - 2 * attach);
+    clipPos.copy(pen.position);
+    clipQuat.copy(pen.quaternion);
+    pen.position.lerpVectors(localPos, clipPos, k);
+    pen.quaternion.slerpQuaternions(localQuat, clipQuat, k);
+    // Out in front of the book the pen would read as a sliver at the rig's
+    // scale, so it is a little larger free and shrinks back as it docks.
+    pen.scale.setScalar(THREE.MathUtils.lerp(FREE_PEN_SCALE, 1, k));
+  };
 
   const updateClips = (delta) => {
     const want = state.recording || state.working;
@@ -367,7 +462,12 @@ export function createDeskScene(canvas, options = {}) {
     desk.rotation.x = (Math.sin(elapsed * 0.2) * 0.03 + pointer.y * 0.05) * calm * still;
     desk.scale.setScalar(homeScale * (1 + smoothedLevel * 0.03));
 
-    if (mixer && actions) updateClips(delta);
+    if (mixer && actions) {
+      updateClips(delta);
+      // The rig's transforms are only current after this; the pen needs them.
+      desk.updateMatrixWorld(true);
+      steerPen(delta);
+    }
 
     const glowTarget = state.recording ? 0.12 + smoothedLevel * 0.3 : state.working ? 0.3 : 0;
     glowMaterial.opacity += (glowTarget - glowMaterial.opacity) * approach(3, delta);
@@ -395,8 +495,10 @@ export function createDeskScene(canvas, options = {}) {
     setState(next) {
       Object.assign(state, next);
     },
+    /** Normalised device coordinates. Only a real cursor sets this: touch keeps the pen on the rig. */
     setPointer(x, y) {
       pointer.set(x, y);
+      pointerSeen = true;
     },
     setReducedMotion(value) {
       reducedMotion = value;
@@ -421,6 +523,7 @@ export function createDeskScene(canvas, options = {}) {
     /** For tests: hold `clip` at `seconds`, with the ink at the same moment. */
     seek(clip, seconds, ink = seconds) {
       if (!actions) return;
+      attach = 1;
       mixer.stopAllAction();
       const action = actions[clip.replace(/_(\w)/g, (_, c) => c.toUpperCase())];
       action.reset();

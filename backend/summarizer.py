@@ -227,8 +227,18 @@ Rules:
 - When a bullet explains a term, a concept or a named thing, open with that name
   in **bold** and follow it with the explanation. Use bold only for that, never
   for a whole sentence: it is what makes a long set of notes scannable, and it
-  stops working the moment half the page is bold. No other formatting. Review
-  questions take no bold: just "Question ? → short answer".
+  stops working the moment half the page is bold. No other formatting besides
+  the mathematics below. Review questions take no bold: just
+  "Question ? → short answer".
+- Write mathematics in LaTeX: inline between single dollars, a whole equation
+  between double dollars as a bullet of its own. Write the expression that was
+  actually spoken - "la limite quand n tend vers l'infini de un sur n vaut
+  zéro" becomes $\\lim_{{n \\to +\\infty}} \\frac{{1}}{{n}} = 0$. Never write out a
+  formula the speaker only named or pointed at ("cette formule", "au
+  tableau", "on applique Taylor"): name it instead, because what was on the
+  board was not heard. If the words could mean two expressions - "x au carré
+  plus un sur deux" - keep the words rather than choose. In the JSON, double
+  every backslash.
 - If the transcript is too short or unintelligible, still return valid JSON with
   whatever can honestly be extracted.
 
@@ -424,6 +434,8 @@ Rules:
 - Cover the whole recording, not just its opening.
 - Keep each bullet to one clear idea, with no leading dash or number. Bold only
   a term a bullet opens with, as **term**.
+- Keep any LaTeX between dollars exactly as the notes have it, backslashes
+  doubled in the JSON.
 
 Notes:
 {TRIPLE_QUOTE}
@@ -466,6 +478,25 @@ def apply_synthesis(merged: dict, parsed: dict, language: str) -> dict:
 # when whitespace follows it.
 _LIST_MARKER = re.compile(r"^\s*(?:[-•]\s*|\*(?!\*)\s+|\d+[.)]\s*)")
 
+# LaTeX between dollars. DOTALL because a broken \nu arrives as a line break.
+_MATH = re.compile(r"\$\$.+?\$\$|\$.+?\$", re.DOTALL)
+# What a JSON decoder makes of an undoubled \frac, \beta, \nu, \theta, \rho.
+_DECODED = {"\f": "\\f", "\b": "\\b", "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+
+
+def repair_math(text: str) -> str:
+    """Undo LaTeX commands a JSON decoder turned into control characters.
+
+    "\\frac" sent with one backslash is valid JSON - a form feed then "rac" -
+    so it parses without complaint and renders as "rac". Maths never holds a
+    real control character, so inside the dollars each one goes back to the
+    backslash it came from.
+    """
+    return _MATH.sub(
+        lambda m: "".join(_DECODED.get(ch, ch) for ch in m.group(0)),
+        text,
+    )
+
 
 def _clean_bullets(raw: object) -> list[str]:
     if isinstance(raw, str):
@@ -484,7 +515,7 @@ def _clean_bullets(raw: object) -> list[str]:
             )
         if not isinstance(item, str):
             continue
-        text = _LIST_MARKER.sub("", item).strip()
+        text = _LIST_MARKER.sub("", repair_math(item)).strip()
         if not text or PLACEHOLDER_PATTERNS.match(text):
             continue
         key = text.lower()

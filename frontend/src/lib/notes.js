@@ -113,8 +113,35 @@ export const downloadMarkdown = (note) => {
  *
  * Deliberately tiny: bullets are one sentence, so there is no block structure
  * to parse and no reason to pull in a Markdown library for it.
+ *
+ * LaTeX comes first, between $...$ or $$...$$, so the underscores and stars a
+ * formula is full of are never read as emphasis. A dollar that opens or
+ * closes against a space ("50 $") is a price, not maths.
  */
-const INLINE_PATTERN = /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|(?<![*\w])\*[^*\n]+\*(?!\w)|(?<![_\w])_[^_\n]+_(?!\w))/g;
+const INLINE_PATTERN = /(\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$|\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|(?<![*\w])\*[^*\n]+\*(?!\w)|(?<![_\w])_[^_\n]+_(?!\w))/g;
+const MATH_PATTERN = /(\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$)/;
+
+const isMath = (piece) => piece.length > 2 && piece.startsWith('$') && piece.endsWith('$');
+
+const mathRun = (piece, key) => {
+  const display = piece.startsWith('$$') && piece.length > 4;
+  const tex = piece.slice(display ? 2 : 1, display ? -2 : -1).trim();
+  return { key, text: piece, tex, math: true, display };
+};
+
+/** A bullet that is nothing but a displayed equation, which needs no bullet dot. */
+export const isDisplayMath = (text) => typeof text === 'string' && /^\s*\$\$[\s\S]+\$\$\s*$/.test(text);
+
+/** Text that is one inline formula and nothing else, such as a card's answer. */
+export const isLoneFormula = (text) => typeof text === 'string' && /^\s*\$(?!\$)[^$]+\$\s*$/.test(text);
+
+/** Plain text and LaTeX, for what sits inside a bold or italic run. */
+export const mathParts = (text) =>
+  String(text || '')
+    .split(MATH_PATTERN)
+    // split() puts what the pattern matched at the odd positions.
+    .map((piece, index) => (index % 2 ? mathRun(piece, index) : { key: index, text: piece }))
+    .filter((part) => part.text);
 
 export const inlineRuns = (text) => {
   const source = typeof text === 'string' ? text : '';
@@ -123,10 +150,14 @@ export const inlineRuns = (text) => {
   const runs = [];
   let index = 0;
 
-  source.split(INLINE_PATTERN).forEach((piece) => {
+  source.split(INLINE_PATTERN).forEach((piece, position) => {
     if (!piece) return;
     index += 1;
-    if (piece.startsWith('**') && piece.endsWith('**')) {
+    // Only a stretch the pattern matched (odd positions) can be maths: plain
+    // text that merely starts and ends with a dollar stays text.
+    if (position % 2 && isMath(piece)) {
+      runs.push(mathRun(piece, index));
+    } else if (piece.startsWith('**') && piece.endsWith('**')) {
       runs.push({ key: index, text: piece.slice(2, -2), bold: true });
     } else if (piece.startsWith('__') && piece.endsWith('__')) {
       runs.push({ key: index, text: piece.slice(2, -2), bold: true });

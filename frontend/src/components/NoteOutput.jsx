@@ -5,7 +5,7 @@ import { ExportButton } from './ExportButton';
 import { Input } from './ui/input';
 import { BulletText } from './BulletText';
 import {
-  languageName, noteToMarkdown, sectionEntries, sectionLabel, stripInline,
+  isDisplayMath, languageName, noteToMarkdown, sectionEntries, sectionLabel, stripInline,
 } from '../lib/notes';
 
 const Section = ({ sectionKey, label, items, copied, onCopy }) => (
@@ -30,7 +30,7 @@ const Section = ({ sectionKey, label, items, copied, onCopy }) => (
           transition={{ delay: Math.min(index * 0.04, 0.4) }}
           className="text-sm text-zinc-300 leading-relaxed flex items-start gap-2"
         >
-          <span className="mt-[7px] w-1 h-1 rounded-full bg-zinc-600 flex-shrink-0" />
+          <span className={`mt-[7px] w-1 h-1 rounded-full flex-shrink-0 ${isDisplayMath(item) ? '' : 'bg-zinc-600'}`} />
           <span>
             <BulletText sectionKey={sectionKey} text={item} />
           </span>

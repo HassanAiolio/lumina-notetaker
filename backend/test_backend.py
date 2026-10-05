@@ -910,3 +910,36 @@ def test_notes_digest_stays_within_its_budget():
     digest = summarizer.notes_digest([{"sections": {"definitions": bullets}}], 4_000)
     assert len(digest) <= 4_000
     assert "Terme numero 199" in digest  # the latest terms are the ones kept
+
+
+# -- LaTeX in the notes ------------------------------------------------------------
+
+LIMIT = r"**Limite** : $\lim_{n \to +\infty} \frac{1}{n} = 0$"
+
+
+def test_latex_with_undoubled_backslashes_survives_parsing():
+    # As a model writes it when it forgets JSON escaping: \l is not JSON at
+    # all, and \t and \f are JSON - a tab and a form feed - that eat \to and \frac.
+    raw = r'{"title":"T","type":"LECTURE","language":"fr","sections":{"methods":["' + LIMIT[:-1] + r'$"]}}'
+    parsed = gemini.parse_json_object(raw)
+    result = summarizer.normalize_result(parsed, requested_language="fr", transcript="x")
+    assert result["sections"]["methods"] == [LIMIT]
+
+
+def test_correctly_escaped_latex_is_left_exactly_as_it_was():
+    raw = json.dumps({"title": "T", "sections": {"methods": [LIMIT, r"$$\sum_{k=0}^{n} k = \frac{n(n+1)}{2}$$"]}})
+    parsed = gemini.parse_json_object(raw)
+    result = summarizer.normalize_result(parsed, requested_language="fr", transcript="x")
+    assert result["sections"]["methods"] == [LIMIT, r"$$\sum_{k=0}^{n} k = \frac{n(n+1)}{2}$$"]
+
+
+def test_math_repair_only_touches_what_is_between_dollars():
+    assert summarizer.repair_math("a\tb $x\tau$") == "a\tb $x" + "\\" + "tau$"
+    assert summarizer.repair_math("pas de maths") == "pas de maths"
+
+
+def test_the_prompt_asks_for_latex_but_not_for_formulas_that_were_not_said():
+    prompt = summarizer.build_prompt("x", "fr")
+    assert r"$\lim_{n \to +\infty} \frac{1}{n} = 0$" in prompt
+    assert "name it instead" in prompt
+    assert "\t" not in prompt and "\f" not in prompt  # the example itself is not mangled

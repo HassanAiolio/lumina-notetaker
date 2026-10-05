@@ -10,7 +10,7 @@ import { ExportButton } from './ExportButton';
 import { ReviseDeck } from './ReviseDeck';
 import { deleteNote, errorMessage, getNote, updateNote } from '../services/api';
 import {
-  languageName, noteCounts, noteToMarkdown, sectionEntries, sectionLabel,
+  isDisplayMath, languageName, noteCounts, noteToMarkdown, sectionEntries, sectionLabel,
 } from '../lib/notes';
 
 const isTyping = (event) => !!event.target.closest?.('input, textarea, [contenteditable="true"]');
@@ -351,7 +351,7 @@ export const NoteReader = ({
                 <ul className="space-y-2.5">
                   {items.map((item, index) => (
                     <li key={`${key}-${index}`} className="text-[15px] text-zinc-300 leading-relaxed flex items-start gap-2.5">
-                      <span className="mt-[9px] w-1 h-1 rounded-full bg-zinc-600 flex-shrink-0" />
+                      <span className={`mt-[9px] w-1 h-1 rounded-full flex-shrink-0 ${isDisplayMath(item) ? '' : 'bg-zinc-600'}`} />
                       <span className="min-w-0">
                         <BulletText sectionKey={key} text={item} />
                       </span>

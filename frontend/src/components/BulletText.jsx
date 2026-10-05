@@ -1,12 +1,84 @@
-import React, { useState } from 'react';
-import { inlineRuns, splitQuestion } from '../lib/notes';
+import React, { useEffect, useState } from 'react';
+import { inlineRuns, mathParts, splitQuestion } from '../lib/notes';
 
-/** One bullet's inline Markdown, rendered rather than shown as asterisks. */
-export const InlineText = ({ text }) =>
-  inlineRuns(text).map((run) =>
-    run.bold ? (
+// KaTeX is fetched the first time a note has maths in it, never before: most
+// notes have none, and it is the largest thing the notes views could load.
+let katexLoading = null;
+let katexReady = null;
+const loadKatex = () => {
+  if (!katexLoading) {
+    katexLoading = Promise.all([import('katex'), import('katex/dist/katex.min.css')])
+      .then(([module]) => {
+        katexReady = module.default || module;
+        return katexReady;
+      })
+      .catch((err) => {
+        katexLoading = null; // a failed chunk download can be tried again
+        throw err;
+      });
+  }
+  return katexLoading;
+};
+
+const renderTex = (katex, tex, display) =>
+  katex.renderToString(tex, {
+    displayMode: display,
+    // A formula the model got slightly wrong shows in red, not as an error.
+    throwOnError: false,
+    strict: 'ignore',
+    output: 'html',
+  });
+
+/** One LaTeX formula. Shows its source until KaTeX has loaded. */
+export const MathText = ({ tex, display = false }) => {
+  const [html, setHtml] = useState(() => (katexReady ? renderTex(katexReady, tex, display) : null));
+
+  useEffect(() => {
+    let live = true;
+    loadKatex()
+      .then((katex) => live && setHtml(renderTex(katex, tex, display)))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [tex, display]);
+
+  if (html === null) {
+    return <code className="font-mono text-[0.9em] text-violet-200/80">{tex}</code>;
+  }
+  return (
+    <span
+      className={display ? 'lumina-math-display' : 'lumina-math'}
+      // KaTeX escapes the source, and without `trust` it allows no links or
+      // HTML of its own; the markup is its rendering of the formula.
+      // eslint-disable-next-line react/no-danger
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+};
+
+/** Text that may hold formulas, as inside a bold term: "**Rendement $\eta$**". */
+const WithMath = ({ text }) =>
+  mathParts(text).map((part) =>
+    part.math ? (
+      <MathText key={part.key} tex={part.tex} display={part.display} />
+    ) : (
+      <React.Fragment key={part.key}>{part.text}</React.Fragment>
+    ),
+  );
+
+/**
+ * One bullet's inline Markdown and LaTeX, rendered rather than shown as symbols.
+ * `promote` sets a text that is a single formula at full size, as a
+ * flashcard's answer should be, instead of squeezed into a line of text.
+ */
+export const InlineText = ({ text, promote = false }) =>
+  inlineRuns(text).map((run, index, runs) =>
+    run.math ? (
+      <MathText key={run.key} tex={run.tex} display={run.display || (promote && runs.length === 1)} />
+    ) : run.bold ? (
       <strong key={run.key} className="font-semibold text-zinc-100">
-        {run.text}
+        <WithMath text={run.text} />
       </strong>
     ) : run.code ? (
       <code
@@ -16,7 +88,9 @@ export const InlineText = ({ text }) =>
         {run.text}
       </code>
     ) : run.italic ? (
-      <em key={run.key}>{run.text}</em>
+      <em key={run.key}>
+        <WithMath text={run.text} />
+      </em>
     ) : (
       <React.Fragment key={run.key}>{run.text}</React.Fragment>
     ),

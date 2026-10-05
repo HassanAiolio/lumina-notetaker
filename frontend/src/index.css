@@ -337,3 +337,23 @@ h4 {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* Formulas in notes (KaTeX). Inline ones sit at text size; a display equation
+   gets its own line and scrolls sideways on a phone instead of overflowing. */
+.lumina-math .katex {
+  font-size: 1.06em;
+}
+.lumina-math-display {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.35rem 0;
+}
+.lumina-math-display .katex-display {
+  margin: 0;
+  text-align: left;
+}
+/* KaTeX centres display maths; in a list of notes it belongs at the left. */
+.lumina-math-display .katex-display > .katex {
+  text-align: left;
+}

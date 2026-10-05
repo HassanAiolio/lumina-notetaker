@@ -159,7 +159,7 @@ export const ReviseDeck = ({ note }) => {
             {KIND_LABEL[current.kind] || 'Card'}
           </span>
           <p className="mt-3 text-lg md:text-xl text-white font-medium leading-snug">
-            <InlineText text={current.front} />
+            <InlineText text={current.front} promote />
           </p>
 
           <div className="flex-1" />
@@ -167,7 +167,7 @@ export const ReviseDeck = ({ note }) => {
           {revealed ? (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-6 space-y-5">
               <p className="text-sm md:text-base text-zinc-200 leading-relaxed border-l-2 border-violet-500/50 pl-4">
-                <InlineText text={current.back} />
+                <InlineText text={current.back} promote />
               </p>
               <div className="flex flex-wrap gap-2">
                 <button

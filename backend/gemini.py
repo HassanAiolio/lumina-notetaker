@@ -271,6 +271,20 @@ async def generate(
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$", re.MULTILINE)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+# A JSON escape, or a lone backslash. Consuming whole escapes first means a
+# correctly doubled "\\" is never split down the middle.
+_ESCAPE_RE = re.compile(r'\\(["\\/bfnrt]|u[0-9a-fA-F]{4})|\\')
+
+
+def repair_escapes(text: str) -> str:
+    """Double every backslash that does not start a valid JSON escape.
+
+    LaTeX in notes is full of them, and a model that forgets to double one
+    writes "\\lim" as \\l, which is not JSON at all. Valid escapes are left
+    alone; the ones LaTeX collides with (\\frac read as a form feed) are
+    put right later, inside the maths, by summarizer.repair_math.
+    """
+    return _ESCAPE_RE.sub(lambda m: m.group(0) if m.group(1) else "\\\\", text)
 
 
 def parse_json_object(text: str) -> dict:
@@ -283,8 +297,9 @@ def parse_json_object(text: str) -> dict:
         return {}
 
     candidate = _FENCE_RE.sub("", text.strip()).strip()
+    trimmed = _TRAILING_COMMA_RE.sub(r"\1", candidate)
 
-    for attempt in (candidate, _TRAILING_COMMA_RE.sub(r"\1", candidate)):
+    for attempt in (candidate, trimmed, repair_escapes(trimmed)):
         try:
             parsed = json.loads(attempt)
             if isinstance(parsed, dict):
@@ -297,7 +312,7 @@ def parse_json_object(text: str) -> dict:
     # Last resort: slice out the outermost {...} and retry.
     start, end = candidate.find("{"), candidate.rfind("}")
     if start != -1 and end > start:
-        sliced = _TRAILING_COMMA_RE.sub(r"\1", candidate[start : end + 1])
+        sliced = repair_escapes(_TRAILING_COMMA_RE.sub(r"\1", candidate[start : end + 1]))
         try:
             parsed = json.loads(sliced)
             if isinstance(parsed, dict):
