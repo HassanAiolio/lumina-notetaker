@@ -12,6 +12,7 @@ import {
   MP3_KBPS,
   SEGMENT_SECONDS,
   TARGET_SAMPLE_RATE,
+  createSegmentQueue,
   decodeToMono16k,
   encodeMp3,
   encodeWav,
@@ -357,6 +358,47 @@ describe('streamWavChunks', () => {
     installWebAudio();
     const iterator = streamWavChunks([]);
     await expect(iterator.next()).rejects.toMatchObject({ reason: 'empty' });
+  });
+
+  it('cuts a live queue exactly where it cuts the finished recording', async () => {
+    // A retry after stop re-chunks the finished array and skips what the live
+    // run already did, so the two must agree on every boundary.
+    installWebAudio({ decode: decoderOf(50) });
+    const finished = await toWavChunks([fakeSegment(), fakeSegment(), fakeSegment()], 40);
+
+    const queue = createSegmentQueue();
+    [fakeSegment(), fakeSegment(), fakeSegment()].forEach((segment) => queue.push(segment));
+    queue.close();
+    const live = [];
+    for await (const chunk of streamWavChunks(queue, { chunkSeconds: 40 })) live.push(chunk);
+
+    expect(live.map((chunk) => chunk.seconds)).toEqual(finished.map((chunk) => chunk.seconds));
+  }, 30000);
+
+  it('hands out chunks while the recording is still going', async () => {
+    installWebAudio({ decode: decoderOf(50) });
+    const queue = createSegmentQueue();
+    const iterator = streamWavChunks(queue, { chunkSeconds: 40 });
+
+    queue.push(fakeSegment());
+    const first = await iterator.next(); // no close() yet: more segments may come
+    expect(first.done).toBe(false);
+    expect(first.value.index).toBe(1);
+
+    // What is left over waits for the next segment rather than going out as a
+    // stub, and comes out once the queue says no more is coming.
+    const pending = iterator.next();
+    queue.close();
+    const tail = await pending;
+    expect(first.value.seconds + tail.value.seconds).toBeCloseTo(50, 3);
+    expect((await iterator.next()).done).toBe(true);
+  }, 30000);
+
+  it('refuses a live queue that closes with nothing in it', async () => {
+    installWebAudio();
+    const queue = createSegmentQueue();
+    queue.close();
+    await expect(streamWavChunks(queue).next()).rejects.toMatchObject({ reason: 'empty' });
   });
 
   it('accepts a single blob as well as a list', async () => {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { test } from 'node:test';
 import worker from '../src/index.js';
 
@@ -24,4 +25,28 @@ test('refuses a chunk without a session', async () => {
 test('health reports which keys the running Worker can see', async () => {
   const body = await (await call('/health')).json();
   assert.deepEqual(body, { ok: true, gemini: false, groq: true });
+});
+
+test('steers a chunk with the end of the previous text, not its start', async () => {
+  const part = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const unsigned = `${part({ alg: 'HS256', typ: 'JWT' })}.${part({ sub: 'u1', exp: Math.floor(Date.now() / 1000) + 3600 })}`;
+  const token = `${unsigned}.${createHmac('sha256', ENV.JWT_SECRET).update(unsigned).digest('base64url')}`;
+  const realFetch = globalThis.fetch;
+  let prompt = null;
+  globalThis.fetch = async (_url, init) => {
+    prompt = init.body.get('prompt');
+    return new Response(JSON.stringify({ text: 'Suite.', language: 'french' }), { status: 200 });
+  };
+  try {
+    const context = `${'début '.repeat(600)}la toute fin`;
+    const response = await call(`/transcribe?language=fr&context=${encodeURIComponent(context)}`, {
+      method: 'POST',
+      body: new Uint8Array([1, 2, 3]),
+      headers: { 'Content-Type': 'audio/mpeg', Authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 200);
+    assert.ok(prompt.endsWith('la toute fin'), 'Whisper is primed with the words just before the chunk');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

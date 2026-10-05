@@ -19,8 +19,11 @@ const MAX_SECONDS = maxRecordingSeconds();
  * release each before touching the next, instead of having to hold the whole
  * thing in memory at once - the reason an hour-long recording used to fail
  * outright. The cost is a few milliseconds of audio at each rotation.
+ *
+ * `onSegment(blob)` hears about each segment the moment it is banked, final
+ * one included, so transcription can start on a lecture while it is going on.
  */
-export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
+export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -43,10 +46,22 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
   const lastMeterPaintRef = useRef(0);
   const wakeLockRef = useRef(null);
   const onMaxDurationRef = useRef(onMaxDuration);
+  const onSegmentRef = useRef(onSegment);
 
   useEffect(() => {
     onMaxDurationRef.current = onMaxDuration;
   }, [onMaxDuration]);
+
+  useEffect(() => {
+    onSegmentRef.current = onSegment;
+  }, [onSegment]);
+
+  /** Keep a finished segment and pass it on. */
+  const bank = useCallback((blob) => {
+    if (!blob) return;
+    segmentsRef.current.push(blob);
+    onSegmentRef.current?.(blob);
+  }, []);
 
   const isSupported =
     typeof navigator !== 'undefined' &&
@@ -98,8 +113,7 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
     segmentStartedAtRef.current = elapsedRef.current;
     recorderRef.current = null;
 
-    const blob = await closeSegment(handle);
-    if (blob) segmentsRef.current.push(blob);
+    bank(await closeSegment(handle));
 
     // stop() or cancel() may have run while the old recorder was closing.
     if (stoppingRef.current || !streamRef.current) return;
@@ -110,7 +124,7 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
     } catch (err) {
       setError('Recording stopped unexpectedly.');
     }
-  }, [closeSegment, openSegment]);
+  }, [bank, closeSegment, openSegment]);
 
   const teardown = useCallback(() => {
     if (levelRef) levelRef.current = 0;
@@ -308,10 +322,7 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
 
     const handle = recorderRef.current;
     recorderRef.current = null;
-    if (handle) {
-      const blob = await closeSegment(handle);
-      if (blob) segmentsRef.current.push(blob);
-    }
+    if (handle) bank(await closeSegment(handle));
 
     const segments = segmentsRef.current;
     const recorded = elapsedRef.current;
@@ -328,7 +339,7 @@ export const useAudioRecorder = ({ onMaxDuration, levelRef } = {}) => {
       seconds: recorded,
       mimeType: segments[0].type || 'audio/webm',
     };
-  }, [closeSegment, teardown]);
+  }, [bank, closeSegment, teardown]);
 
   const pause = useCallback(() => {
     if (!streamRef.current || pausedRef.current) return;

@@ -6,7 +6,8 @@
  * down both halves: emphasis that is handled renders, and anything else is left
  * exactly as written rather than silently eaten.
  */
-import { inlineRuns, stripInline } from './notes';
+import {
+  splitQuestion, inlineRuns, stripInline } from './notes';
 
 const plain = (text) => inlineRuns(text).map((r) => r.text).join('');
 
@@ -50,5 +51,26 @@ describe('inlineRuns', () => {
 describe('stripInline', () => {
   it('gives the plain text, for copying and previews', () => {
     expect(stripInline('**Terme** : la `def` et *plus*')).toBe('Terme : la def et plus');
+  });
+});
+
+describe('splitQuestion', () => {
+  it('splits a review question from its answer', () => {
+    expect(splitQuestion("Que mesure l'entropie ? → Le désordre d'un système")).toEqual({
+      question: "Que mesure l'entropie ?",
+      answer: "Le désordre d'un système",
+    });
+  });
+
+  it('takes the first arrow, so an answer can contain one', () => {
+    expect(splitQuestion('Sens de la réaction ? → A -> B')).toEqual({
+      question: 'Sens de la réaction ?',
+      answer: 'A -> B',
+    });
+  });
+
+  it('leaves a bullet without an answer alone', () => {
+    expect(splitQuestion('Une question sans réponse ?')).toBeNull();
+    expect(splitQuestion(undefined)).toBeNull();
   });
 });

@@ -165,8 +165,12 @@ export const resetTranscriptionRoute = () => {
   workerDownUntil = 0;
 };
 
+// Context is only ever used for its last stretch (1200 characters for Gemini,
+// 400 for Whisper), and on the Worker path it travels in the URL.
+const CONTEXT_CHARS = 1500;
+
 export const transcribeChunk = async ({ blob, language = 'auto', context = '', signal }) => {
-  const args = { blob, language, context, signal };
+  const args = { blob, language, context: context.slice(-CONTEXT_CHARS), signal };
   if (!TRANSCRIBE_URL || Date.now() < workerDownUntil) return viaBackend(args);
   try {
     return await viaWorker(args);

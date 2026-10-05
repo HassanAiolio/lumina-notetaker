@@ -52,6 +52,9 @@ function Workspace() {
   const [currentNote, setCurrentNote] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  // A recording or its transcription is under way. Switching tabs unmounts
+  // the recorder, which would end the recording and lose its audio.
+  const [sessionActive, setSessionActive] = useState(false);
   const [airplaneFlying, setAirplaneFlying] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [activeTab, setActiveTab] = useState('record');
@@ -97,8 +100,12 @@ function Workspace() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [transcript, savedCurrent]);
 
-  const handleSummarize = useCallback(async () => {
-    const text = transcript.trim();
+  // `override` carries a transcript that has only just been written: a
+  // recording that finished transcribing goes straight on to notes, before
+  // the state holding it has re-rendered.
+  const handleSummarize = useCallback(async (override) => {
+    const text = (override?.transcript ?? transcript).trim();
+    const heard = override?.language || detectedLanguage;
     if (!text) {
       toast.error('There is nothing to summarize yet.');
       return;
@@ -107,12 +114,12 @@ function Workspace() {
     setIsSummarizing(true);
     setSavedCurrent(false);
     try {
-      const summaryLanguage = language === 'auto' ? detectedLanguage || 'auto' : language;
+      const summaryLanguage = language === 'auto' ? heard || 'auto' : language;
       const result = await summarizeTranscript(text, summaryLanguage);
       setCurrentNote({
         title: result.title,
         type: result.type || '',
-        language: result.language || detectedLanguage || language,
+        language: result.language || heard || language,
         sections: result.sections || {},
         labels: result.labels || {},
         raw_transcript: text,
@@ -207,7 +214,13 @@ function Workspace() {
                   <button
                     key={id}
                     onClick={() => setActiveTab(id)}
-                    className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors duration-200 ${
+                    disabled={sessionActive && id !== activeTab}
+                    title={
+                      sessionActive && id !== activeTab
+                        ? 'Stop the recording and let it finish transcribing first'
+                        : undefined
+                    }
+                    className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors duration-200 disabled:opacity-40 disabled:cursor-not-allowed ${
                       activeTab === id
                         ? 'bg-violet-600/30 text-violet-300'
                         : 'text-zinc-400 hover:text-white'
@@ -284,7 +297,9 @@ function Workspace() {
                       onLanguageChange={setLanguage}
                       languages={languages}
                       isSummarizing={isSummarizing}
-                      onSummarize={handleSummarize}
+                      onSummarize={() => handleSummarize()}
+                      onTranscribed={handleSummarize}
+                      onSessionChange={setSessionActive}
                       onRecordingChange={setIsRecording}
                       onTranscribingChange={setIsTranscribing}
                       onDetectedLanguage={setDetectedLanguage}

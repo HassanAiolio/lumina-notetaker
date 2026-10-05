@@ -251,3 +251,24 @@ it('throws away segments when a recording is discarded', async () => {
   expect(api.seconds).toBe(0);
   expect(api.isRecording).toBe(false);
 });
+
+it('hands each segment over as soon as it closes, the last one on stop', async () => {
+  const handed = [];
+  await render({ onSegment: (blob) => handed.push(blob) });
+  await act(async () => {
+    await api.start();
+  });
+
+  await tickSeconds(6);
+  expect(handed).toHaveLength(1); // the first rotation, while still recording
+
+  await tickSeconds(5);
+  expect(handed).toHaveLength(2);
+
+  let recording;
+  await act(async () => {
+    recording = await api.stop();
+  });
+  expect(handed).toHaveLength(3);
+  expect(handed).toEqual(recording.segments);
+});

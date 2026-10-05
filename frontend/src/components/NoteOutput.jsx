@@ -3,8 +3,9 @@ import { motion } from 'framer-motion';
 import { Check, ChevronDown, Copy, Plus, TriangleAlert, X } from 'lucide-react';
 import { ExportButton } from './ExportButton';
 import { Input } from './ui/input';
+import { BulletText } from './BulletText';
 import {
-  inlineRuns, languageName, noteToMarkdown, sectionEntries, sectionLabel, stripInline,
+  languageName, noteToMarkdown, sectionEntries, sectionLabel, stripInline,
 } from '../lib/notes';
 
 const Section = ({ sectionKey, label, items, copied, onCopy }) => (
@@ -31,24 +32,7 @@ const Section = ({ sectionKey, label, items, copied, onCopy }) => (
         >
           <span className="mt-[7px] w-1 h-1 rounded-full bg-zinc-600 flex-shrink-0" />
           <span>
-            {inlineRuns(item).map((run) =>
-              run.bold ? (
-                <strong key={run.key} className="font-semibold text-zinc-100">
-                  {run.text}
-                </strong>
-              ) : run.code ? (
-                <code
-                  key={run.key}
-                  className="px-1 py-0.5 rounded bg-white/5 text-violet-200 text-[0.85em] font-mono"
-                >
-                  {run.text}
-                </code>
-              ) : run.italic ? (
-                <em key={run.key}>{run.text}</em>
-              ) : (
-                <React.Fragment key={run.key}>{run.text}</React.Fragment>
-              ),
-            )}
+            <BulletText sectionKey={sectionKey} text={item} />
           </span>
         </motion.li>
       ))}

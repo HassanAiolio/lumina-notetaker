@@ -810,3 +810,103 @@ def test_bullet_cleanup_keeps_bold_but_drops_list_markers():
         "un vrai numero",
         "**Gras** en tete et *italique* au milieu",
     ]
+
+
+# -- windows that build on each other ---------------------------------------------
+
+def _lecture_json(sections, title="Partie"):
+    return json.dumps({"title": title, "type": "LECTURE", "language": "fr",
+                       "sections": sections, "labels": {}})
+
+
+def _is_synthesis(prompt):
+    return "written part by part and\njoined" in prompt
+
+
+async def test_later_windows_see_the_notes_so_far_and_keep_the_first_type(monkeypatch):
+    prompts: list[str] = []
+
+    async def gemini_answer(parts, **_k):
+        prompt = parts[0]["text"]
+        prompts.append(prompt)
+        if _is_synthesis(prompt):
+            return _lecture_json({"overview": ["Vue d'ensemble"]})
+        n = len(prompts)
+        return _lecture_json({"definitions": [f"**Terme{n}** : explication {n}"]})
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+    monkeypatch.setattr(summarizer.settings, "GEMINI_WINDOW_CHARS", 8_000)
+
+    await summarizer.summarize(_long_transcript(), "auto")
+
+    windows = [p for p in prompts if not _is_synthesis(p)]
+    assert len(windows) > 2
+    assert "Step 1 - classify" in windows[0]          # only the first one classifies
+    assert "part 2 of" in windows[1]
+    assert "**Terme1** : explication 1" in windows[1]  # the previous part's notes
+    assert "Terms already covered: Terme1; Terme2" in windows[2]
+    for later in windows[1:]:
+        assert "This is a LECTURE" in later
+        assert "The transcript is in French" in later  # "auto" settled by the first
+
+
+async def test_synthesis_rewrites_the_whole_recording_sections_and_keeps_the_detail(monkeypatch):
+    async def gemini_answer(parts, **_k):
+        prompt = parts[0]["text"]
+        if _is_synthesis(prompt):
+            assert "[definitions]" in prompt
+            assert "Partie seule" not in prompt  # per-part overviews are not fed back in
+            return _lecture_json(
+                {"overview": ["Le cours entier"], "key_takeaways": ["A retenir"]},
+                title="Thermodynamique",
+            )
+        return _lecture_json({"overview": ["Partie seule"], "definitions": [f"**T{len(prompt)}** : d"]})
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+    monkeypatch.setattr(summarizer.settings, "GEMINI_WINDOW_CHARS", 8_000)
+
+    result = await summarizer.summarize(_long_transcript(), "fr")
+
+    assert result["title"] == "Thermodynamique"
+    assert result["sections"]["overview"] == ["Le cours entier"]
+    assert result["sections"]["key_takeaways"] == ["A retenir"]
+    assert len(result["sections"]["definitions"]) > 2  # every part's detail survives
+    assert list(result["sections"])[:2] == ["overview", "key_takeaways"]
+    assert result["degraded"] is False
+
+
+async def test_a_failed_synthesis_keeps_the_joined_notes(monkeypatch):
+    async def gemini_answer(parts, **_k):
+        if _is_synthesis(parts[0]["text"]):
+            raise gemini.GeminiError("quota", quota=True)
+        return _lecture_json({"overview": ["Partie"], "definitions": ["**T** : d"]})
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+    monkeypatch.setattr(summarizer.settings, "GEMINI_WINDOW_CHARS", 8_000)
+
+    result = await summarizer.summarize(_long_transcript(), "fr")
+
+    assert result["sections"]["definitions"] == ["**T** : d"]
+    assert result["degraded"] is False  # nothing of the transcript was lost
+
+
+async def test_a_short_transcript_is_one_request_with_no_synthesis(monkeypatch):
+    prompts: list[str] = []
+
+    async def gemini_answer(parts, **_k):
+        prompts.append(parts[0]["text"])
+        return _lecture_json({"overview": ["Court"]})
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+
+    await summarizer.summarize("Une phrase. Puis une autre.", "fr")
+
+    assert len(prompts) == 1
+    assert "part 1 of" not in prompts[0]
+
+
+def test_notes_digest_stays_within_its_budget():
+    bullets = [f"**Terme numero {i}** : " + "explication " * 40 for i in range(200)]
+    digest = summarizer.notes_digest([{"sections": {"definitions": bullets}}], 4_000)
+    assert len(digest) <= 4_000
+    assert "Terme numero 199" in digest  # the latest terms are the ones kept

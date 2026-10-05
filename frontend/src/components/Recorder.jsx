@@ -12,12 +12,13 @@ import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import {
   AudioDecodeError,
   chunkSecondsForConnection,
+  createSegmentQueue,
   estimateChunkCount,
   formatDuration,
-  streamWavChunks,
   toSingleWav,
 } from '../lib/audio';
-import { errorMessage, transcribeChunk } from '../services/api';
+import { freshProgress, isCancel, transcribeSegments } from '../lib/transcription';
+import { errorMessage } from '../services/api';
 import { languageName } from '../lib/notes';
 
 const LevelMeter = ({ levels, paused }) => (
@@ -64,12 +65,16 @@ export const Recorder = ({
   onRecordingChange,
   onTranscribingChange,
   onDetectedLanguage,
+  onTranscribed,
+  onSessionChange,
   audioLevelRef,
 }) => {
   const [mode, setMode] = useState('voice');
-  const [stage, setStage] = useState('idle'); // idle | encoding | transcribing
+  const [stage, setStage] = useState('idle'); // idle | transcribing
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [pipelineError, setPipelineError] = useState('');
+  // The live run gave up mid-recording; whatever is left is done after stop.
+  const [liveStalled, setLiveStalled] = useState(false);
   // The last recording is kept so a failed transcription can be retried, or the
   // audio downloaded, instead of asking someone to say it all again. It holds
   // the capture segments rather than one blob, which is also what the
@@ -79,8 +84,13 @@ export const Recorder = ({
   // instant on a long one and needs to say so.
   const [joining, setJoining] = useState(null);
 
+  // The transcription run in progress while recording: segments go into its
+  // queue as they close, and it works through them as the lecture goes on.
+  const liveRef = useRef(null);
+
   const recorder = useAudioRecorder({
     levelRef: audioLevelRef,
+    onSegment: (blob) => liveRef.current?.queue.push(blob),
     onMaxDuration: () => {
       toast.warning('Maximum recording length reached — wrapping up.');
       handleStop();
@@ -89,6 +99,35 @@ export const Recorder = ({
   const speech = useSpeechRecognition();
   const abortRef = useRef(null);
   const stoppingRef = useRef(false);
+
+  // Chunks land one at a time, often long after the render that started the
+  // run, so appending goes through a ref rather than a stale `transcript`.
+  const transcriptRef = useRef(transcript);
+  useEffect(() => {
+    transcriptRef.current = transcript;
+  }, [transcript]);
+  const writeTranscript = useCallback(
+    (value) => {
+      transcriptRef.current = value;
+      onTranscriptChange(value);
+    },
+    [onTranscriptChange],
+  );
+  // Each chunk goes into the transcript (and so the saved draft) as soon as it
+  // is back, so a tab that dies an hour in still leaves an hour of text.
+  const appendText = useCallback(
+    (text) => {
+      if (text) writeTranscript([transcriptRef.current, text].filter(Boolean).join(' ').trim());
+    },
+    [writeTranscript],
+  );
+  const onChunk = useCallback(
+    (text, { done }) => {
+      appendText(text);
+      setProgress((previous) => ({ done, total: Math.max(previous.total, done) }));
+    },
+    [appendText],
+  );
 
   const busy = stage !== 'idle';
   const hasTranscript = transcript.trim().length > 0;
@@ -102,21 +141,72 @@ export const Recorder = ({
     onTranscribingChange?.(busy);
   }, [busy, onTranscribingChange]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  // Paused counts too: leaving this view unmounts the recorder, which stops
+  // the microphone and drops the audio.
+  useEffect(() => {
+    onSessionChange?.(recorder.isRecording || busy);
+  }, [busy, onSessionChange, recorder.isRecording]);
+
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+      liveRef.current?.controller.abort();
+      liveRef.current?.queue.close();
+    },
+    [],
+  );
 
   const localeFor = useCallback(
     (code) => languages.find((entry) => entry.code === code)?.locale || 'en-US',
     [languages],
   );
 
+  /** A recording is fully transcribed: keep its audio, report, hand over. */
+  const finishRecording = useCallback(
+    (recording, progress) => {
+      // context only ever holds text a chunk returned, so empty means silence.
+      if (!progress.context) {
+        setPendingRecording({ ...recording, progress });
+        setPipelineError('No speech was detected in that recording.');
+        return;
+      }
+      // The audio stays until the next recording, so a transcript that came
+      // out wrong can still be saved and redone.
+      setPendingRecording({ ...recording, progress, complete: true });
+      if (progress.detected) onDetectedLanguage?.(progress.detected);
+      toast.success(
+        progress.detected
+          ? `Transcribed (${languageName(progress.detected) || progress.detected})`
+          : 'Transcribed',
+      );
+      onTranscribed?.({ transcript: transcriptRef.current, language: progress.detected });
+    },
+    [onDetectedLanguage, onTranscribed],
+  );
+
   /**
-   * Encode and upload the recording one chunk at a time.
-   *
-   * Chunks are pulled from the encoder one ahead of the upload rather than all
-   * built up front, so at most two chunks of audio are ever in memory and the
-   * first upload starts as soon as the first four minutes have been encoded
-   * instead of after the whole recording has.
+   * A run stopped part-way. Every chunk it finished is already in the
+   * transcript, so the recording remembers where it got to and a retry only
+   * does the rest - transcribing from the top used to append the opening of
+   * the recording a second time.
    */
+  const failRecording = useCallback((recording, err, fallbackProgress) => {
+    const progress = err?.progress || fallbackProgress;
+    setPendingRecording({ ...recording, progress });
+    if (isCancel(err)) {
+      setPipelineError('Transcription stopped. The text so far is kept; retry to do the rest.');
+    } else if (err instanceof AudioDecodeError) {
+      setPipelineError(decodeErrorMessage(err));
+    } else if (progress.done > 0) {
+      setPipelineError(
+        `${errorMessage(err, 'Transcription failed.')} The text so far is below, and retrying picks up where it stopped.`,
+      );
+    } else {
+      setPipelineError(errorMessage(err, 'Transcription failed.'));
+    }
+  }, []);
+
+  /** Transcribe a finished recording, from wherever an earlier run stopped. */
   const runTranscription = useCallback(
     async (recording) => {
       const segments = recording?.segments || [];
@@ -124,144 +214,117 @@ export const Recorder = ({
         setPipelineError('Nothing was recorded. Check that your microphone is working.');
         return;
       }
-
-      // A retry carries on from the chunk that failed. The chunks before it are
-      // already in the transcript, and transcribing them again used to append
-      // the opening of the recording a second time. The chunk length is pinned
-      // with them, so the boundaries line up even if the connection changed.
-      const resumeFrom = recording.progress || {
-        done: 0,
-        context: '',
-        detected: '',
-        chunkSeconds: chunkSecondsForConnection(),
-      };
+      // The chunk length is pinned with the progress, so the cut points line
+      // up with the earlier run even if the connection has changed since.
+      const start = recording.progress || freshProgress(chunkSecondsForConnection());
 
       setPipelineError('');
-      setStage('encoding');
+      setStage('transcribing');
       // Chunks arrive lazily, so the real total is only known at the end. The
       // recorded length estimates it to within one chunk.
-      setProgress({
-        done: resumeFrom.done,
-        total: estimateChunkCount(recording.seconds, resumeFrom.chunkSeconds),
-      });
+      setProgress({ done: start.done, total: estimateChunkCount(recording.seconds, start.chunkSeconds) });
 
       const controller = new AbortController();
       abortRef.current = controller;
-
-      const pieces = [];
-      let { context, detected, done } = resumeFrom;
-      const remember = (extra = {}) =>
-        setPendingRecording({
-          ...recording,
-          progress: { done, context, detected, chunkSeconds: resumeFrom.chunkSeconds },
-          ...extra,
-        });
-
-      // MP3 rather than WAV: a chunk is 2.7 times smaller, which is what keeps
-      // the backend inside its hosting bandwidth (see MP3_KBPS for why 96 kbps).
-      const chunks = streamWavChunks(segments, {
-        chunkSeconds: resumeFrom.chunkSeconds,
-        format: 'mp3',
-        skipChunks: resumeFrom.done,
-      });
-      // The next chunk is encoded while the current one uploads. MP3 encoding
-      // takes seconds per chunk on a phone, and done in series it would add up
-      // over a long lecture. The catch only marks a failure as handled here;
-      // awaiting the same promise below still throws it.
-      const prepare = () => {
-        const pending = chunks.next();
-        pending.catch(() => {});
-        return pending;
-      };
-      let upcoming = prepare();
-
       try {
-        for (;;) {
-          // eslint-disable-next-line no-await-in-loop
-          const { value: chunk, done: finished } = await upcoming;
-          if (finished || controller.signal.aborted) break;
-          upcoming = prepare();
-          setStage('transcribing');
-          // eslint-disable-next-line no-await-in-loop
-          const result = await transcribeChunk({
-            blob: chunk.blob,
-            language,
-            context,
-            signal: controller.signal,
-          });
-          if (result.text) {
-            pieces.push(result.text);
-            context = result.text;
-          }
-          if (!detected && result.language && result.language !== 'auto') {
-            detected = result.language;
-          }
-          done += 1;
-          // Captured per iteration: the updater may run after `done` has moved on.
-          const completed = done;
-          setProgress((previous) => ({
-            done: completed,
-            total: Math.max(previous.total, completed),
-          }));
-        }
+        const progress = await transcribeSegments(segments, {
+          language,
+          progress: start,
+          signal: controller.signal,
+          onChunk,
+        });
+        finishRecording(recording, progress);
       } catch (err) {
-        setStage('idle');
-        // A cancelled run throws its text away, so it must not move the point
-        // a retry starts from either.
-        if (controller.signal.aborted) return;
-        // Whatever came back before the failure is still worth keeping, and
-        // goes into the transcript now - so a retry must only do the rest.
-        remember();
-        if (pieces.length) {
-          onTranscriptChange([transcript, pieces.join(' ')].filter(Boolean).join(' ').trim());
-          setPipelineError(
-            'Only part of the recording could be transcribed. The text so far is below, and retrying picks up where it stopped.',
-          );
-        } else if (err instanceof AudioDecodeError) {
-          setPipelineError(decodeErrorMessage(err));
-        } else if (done > 0) {
-          setPipelineError(
-            `${errorMessage(err, 'Transcription failed.')} Retrying picks up where it stopped.`,
-          );
-        } else {
-          setPipelineError(errorMessage(err, 'Transcription failed.'));
-        }
-        return;
+        failRecording(recording, err, start);
       } finally {
         abortRef.current = null;
-        // Stop the encoder working ahead on a chunk nobody will upload.
-        chunks.return().catch(() => {});
+        setStage('idle');
       }
-
-      setStage('idle');
-      if (controller.signal.aborted) return;
-      const text = pieces.join(' ').trim();
-
-      if (!text && !resumeFrom.done) {
-        setPipelineError('No speech was detected in that recording.');
-        return;
-      }
-
-      // The audio stays until the next recording, so a transcript that came
-      // out wrong can still be saved and redone - it used to be dropped the
-      // moment transcription succeeded, however bad the result.
-      remember({ complete: true });
-      if (detected) onDetectedLanguage?.(detected);
-      onTranscriptChange([transcript, text].filter(Boolean).join(' ').trim());
-      toast.success(
-        detected ? `Transcribed (${languageName(detected) || detected})` : 'Transcribed',
-      );
     },
-    [language, onDetectedLanguage, onTranscriptChange, transcript],
+    [failRecording, finishRecording, language, onChunk],
+  );
+
+  /**
+   * Start transcribing while the recording is still going.
+   *
+   * Each segment is chunked and sent the moment the recorder closes it, so by
+   * the end of a lecture all but its last few minutes are already text. This
+   * used to wait for stop and then do the whole recording in series - half an
+   * hour of chunks one after another for a two hour lecture.
+   */
+  const startLive = useCallback(() => {
+    const controller = new AbortController();
+    const live = {
+      queue: createSegmentQueue(),
+      controller,
+      // Kept so discarding the recording can take its text back out.
+      base: transcriptRef.current,
+      progress: freshProgress(chunkSecondsForConnection()),
+      error: null,
+    };
+    live.promise = transcribeSegments(live.queue, {
+      language,
+      progress: live.progress,
+      signal: controller.signal,
+      // The lecture has time to spare; a dropped connection should not hand
+      // the rest of it back to the end.
+      retries: 2,
+      onChunk: (text, progress) => {
+        live.progress = progress;
+        onChunk(text, progress);
+      },
+    }).catch((err) => {
+      live.error = err;
+      if (err.progress) live.progress = err.progress;
+      if (!controller.signal.aborted) setLiveStalled(true);
+    });
+    liveRef.current = live;
+  }, [language, onChunk]);
+
+  /** After stop: let the live run do the last stretch, or pick up where it failed. */
+  const finishLive = useCallback(
+    async (recording, live) => {
+      setStage('transcribing');
+      setProgress({
+        done: live.progress.done,
+        total: Math.max(live.progress.done, estimateChunkCount(recording.seconds, live.progress.chunkSeconds)),
+      });
+      abortRef.current = live.controller;
+      live.queue.close();
+      await live.promise;
+      abortRef.current = null;
+      setStage('idle');
+      setLiveStalled(false);
+
+      if (!live.error) {
+        finishRecording(recording, live.progress);
+      } else if (isCancel(live.error) || live.error instanceof AudioDecodeError) {
+        failRecording(recording, live.error, live.progress);
+      } else {
+        // It already retried during the lecture, but that was minutes ago.
+        await runTranscription({ ...recording, progress: live.progress });
+      }
+    },
+    [failRecording, finishRecording, runTranscription],
   );
 
   const handleStart = useCallback(async () => {
     setPipelineError('');
     setPendingRecording(null);
+    setLiveStalled(false);
+    setProgress({ done: 0, total: 0 });
     speech.reset();
+    // Ready before the recorder starts, so no segment can arrive to nobody.
+    startLive();
     const started = await recorder.start();
-    if (started) speech.start(localeFor(language));
-  }, [language, localeFor, recorder, speech]);
+    if (started) {
+      speech.start(localeFor(language));
+    } else {
+      liveRef.current?.controller.abort();
+      liveRef.current?.queue.close();
+      liveRef.current = null;
+    }
+  }, [language, localeFor, recorder, speech, startLive]);
 
   const handleStop = useCallback(async () => {
     // The button stays live until the recorder has finished closing, and a
@@ -270,24 +333,39 @@ export const Recorder = ({
     stoppingRef.current = true;
     try {
       speech.stop();
+      // Stopping banks the final segment, which goes to the live run's queue.
       const recording = await recorder.stop();
+      const live = liveRef.current;
+      liveRef.current = null;
       if (!recording) {
+        live?.controller.abort();
+        live?.queue.close();
         setPipelineError('Nothing was recorded. Check that your microphone is working.');
         return;
       }
       setPendingRecording(recording);
-      await runTranscription(recording);
+      if (live) await finishLive(recording, live);
+      else await runTranscription(recording);
     } finally {
       stoppingRef.current = false;
     }
-  }, [recorder, runTranscription, speech]);
+  }, [finishLive, recorder, runTranscription, speech]);
 
   const handleDiscard = useCallback(async () => {
     speech.stop();
+    const live = liveRef.current;
+    liveRef.current = null;
+    live?.controller.abort();
+    live?.queue.close();
     await recorder.cancel();
+    // What the live run already wrote belongs to the recording being thrown away.
+    if (live) writeTranscript(live.base);
     setPendingRecording(null);
     setPipelineError('');
-  }, [recorder, speech]);
+    setLiveStalled(false);
+    setProgress({ done: 0, total: 0 });
+  }, [recorder, speech, writeTranscript]);
+
 
   const saveFile = useCallback((blob, name) => {
     const url = URL.createObjectURL(blob);
@@ -437,6 +515,14 @@ export const Recorder = ({
                     </span>
                   </div>
 
+                  {(progress.done > 0 || liveStalled) && (
+                    <p className="text-[11px] text-zinc-400 text-center" data-testid="live-progress">
+                      {liveStalled
+                        ? 'Live transcription paused — the rest is done when you stop.'
+                        : `About ${Math.round((progress.done * (liveRef.current?.progress.chunkSeconds || 0)) / 60)} min already transcribed`}
+                    </p>
+                  )}
+
                   <div className="flex items-center gap-2">
                     <button
                       onClick={recorder.isPaused ? recorder.resume : recorder.pause}
@@ -468,13 +554,11 @@ export const Recorder = ({
                   data-testid="transcribe-progress"
                 >
                   <span className="text-sm text-zinc-300">
-                    {stage === 'encoding'
-                      ? 'Preparing audio…'
-                      : progress.total > 1
-                        ? `Transcribing part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
-                        : 'Transcribing…'}
+                    {progress.total > 1
+                      ? `Transcribing part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
+                      : 'Transcribing…'}
                   </span>
-                  {stage === 'transcribing' && progress.total > 1 && (
+                  {progress.total > 1 && (
                     <div className="w-48 h-1 rounded-full bg-white/5 overflow-hidden">
                       <motion.div
                         className="h-full bg-violet-500"

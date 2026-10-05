@@ -17,24 +17,54 @@ logger = logging.getLogger(__name__)
 # A plan is a menu, not a checklist: the model is told to drop any section it
 # has nothing real for, so a long list costs nothing when it does not apply.
 # LECTURE is the richest because notes from a course are revised from later,
-# where a meeting summary is mostly read once - a definition given in passing or
-# an aside about what the exam covers is exactly what is worth keeping, and
-# "important_details" on its own was too vague a bucket to catch either.
+# where a meeting summary is mostly read once. Its sections are what a student
+# revises with: what to remember above all, what the teacher said is examined,
+# then the material itself, then questions to test yourself on. The old
+# catch-alls ("important_details", "open_questions") collected the asides a
+# revision sheet is better off without.
 SECTION_PLANS: dict[str, list[str]] = {
     "MEETING": ["summary", "decisions", "action_items", "follow_ups"],
     "LECTURE": [
         "overview",
+        "key_takeaways",
+        "exam_notes",
         "key_concepts",
         "definitions",
+        "methods",
         "examples",
-        "important_details",
-        "exam_notes",
-        "open_questions",
         "homework",
+        "review_questions",
     ],
     "BRAINSTORM": ["ideas", "most_promising", "next_steps"],
     "INTERVIEW": ["summary", "key_points", "quotes", "follow_ups"],
     "OTHER": ["summary", "key_takeaways", "action_items"],
+}
+
+# What goes in a lecture's sections. The keys alone left the model guessing,
+# and a guess put formulas under "examples" and examples under "key_concepts".
+LECTURE_GUIDE: dict[str, str] = {
+    "overview": "2 to 5 bullets: what was covered, in order, and how it fits together",
+    "key_takeaways": "the few things to remember above all (3 to 8), each in one sentence",
+    "exam_notes": "only what the speaker said is assessed, examinable or must be known",
+    "key_concepts": "ideas that were explained, with the reasoning given - why it holds, "
+    "what it is for, how it connects - not just the name",
+    "definitions": "terms that were defined, as '**Term** : definition as given'",
+    "methods": "theorems, formulas, rules, procedures and their steps, written exactly",
+    "examples": "worked examples and cases used to illustrate, with their result",
+    "homework": "assignments, readings and deadlines",
+    "review_questions": "questions to test yourself with, about one per major point, each "
+    "written as 'Question ? → short answer', answered only from the transcript",
+}
+
+# Sections that need the whole recording in view. A long transcript is
+# summarized in parts, so these are rewritten once at the end from the joined
+# notes - five per-part overviews in a row read as five summaries, not one.
+SYNTHESIS_KEYS: dict[str, list[str]] = {
+    "MEETING": ["summary"],
+    "LECTURE": ["overview", "key_takeaways"],
+    "BRAINSTORM": ["most_promising"],
+    "INTERVIEW": ["summary"],
+    "OTHER": ["summary", "key_takeaways"],
 }
 
 # What each type looks like, so a seminar full of discussion is not filed as a
@@ -92,19 +122,72 @@ def _language_clause(language: str) -> str:
     )
 
 
-def build_prompt(transcript: str, language: str) -> str:
+def _type_clause(content_type: str | None) -> str:
+    """Classify, or - for every part after the first - keep the first part's type.
+
+    Each part of a long recording used to be classified on its own, so a
+    lecture could come back half LECTURE and half OTHER and its notes split
+    between two section plans.
+    """
+    guide = "\n".join(f"  - {key}: {text}" for key, text in LECTURE_GUIDE.items())
+    if content_type in SECTION_PLANS:
+        clause = (
+            f"This is a {content_type} ({TYPE_CUES[content_type]}). Use these section "
+            f"keys, in this order: {', '.join(SECTION_PLANS[content_type])}"
+        )
+        return clause + (f"\n\nWhat each section holds:\n{guide}" if content_type == "LECTURE" else "")
+
     cues = "\n".join(f"- {kind}: {cue}" for kind, cue in TYPE_CUES.items())
     plans = "\n".join(f"- {kind}: {', '.join(keys)}" for kind, keys in SECTION_PLANS.items())
-    return f"""Analyse the transcript below and produce structured notes.
-
-{_language_clause(language)}
-
-Step 1 - classify the transcript as one of:
+    return f"""Step 1 - classify the transcript as one of:
 {cues}
 
 Step 2 - use the section keys for that type, in the order listed:
 {plans}
 
+For a LECTURE, what each section holds:
+{guide}"""
+
+
+def _continuation_clause(part: tuple[int, int] | None, previous: str) -> str:
+    """Tell a later part what the earlier parts already said.
+
+    Without it every part was summarized blind: a concept introduced in part
+    one and developed in part two came back as two near-duplicate bullets, and
+    the joined notes read like several sets stapled together. With the notes so
+    far in view, a part adds what is new and reuses the names already chosen.
+    """
+    if not part or not previous:
+        return ""
+    index, total = part
+    return f"""
+This transcript is part {index} of {total} of one recording. The notes are
+written part by part and joined. Notes already written for the earlier parts
+are below - they are context only, never copy them into your answer:
+{TRIPLE_QUOTE}
+{previous}
+{TRIPLE_QUOTE}
+- Add only what this part brings. Do not restate a point those notes already
+  make; where this part comes back to a term already covered, add only what is
+  new about it, and call it by the same name so the joined notes agree.
+- Do not ask a review question that was already asked.
+"""
+
+
+def build_prompt(
+    transcript: str,
+    language: str,
+    *,
+    content_type: str | None = None,
+    part: tuple[int, int] | None = None,
+    previous: str = "",
+) -> str:
+    return f"""Analyse the transcript below and produce structured notes.
+
+{_language_clause(language)}
+
+{_type_clause(content_type)}
+{_continuation_clause(part, previous)}
 Return exactly this JSON shape:
 {{
   "title": "a short, specific title for these notes",
@@ -123,20 +206,29 @@ Rules:
   definition or a conclusion that was not said. Where the transcript reads
   [inaudible] or is plainly garbled, leave that point out rather than guess at
   it.
-- Scale the notes to the material: roughly one bullet per 200 to 400 words of
-  transcript, spread over the sections that have content. An hour of teaching
-  should leave someone enough to revise from, not a five-line abstract.
 - Within a section, keep the order in which things came up.
-- In a LECTURE, exam_notes holds only what the speaker actually flagged as
-  assessed, examinable or important to remember, and open_questions only what
-  was left unresolved or deferred. Leave both out if nothing was said.
+- A LECTURE is notes for a student revising for an exam. Keep what can be
+  examined or is needed to understand it: concepts and the reasoning behind
+  them, definitions, theorems, formulas, methods, worked examples, dates and
+  names, and anything the speaker stressed, repeated or tied to the exam.
+  Leave out logistics (attendance, rooms, slides, breaks), jokes, anecdotes,
+  digressions and the speaker repeating themselves - unless they tied it to
+  the exam. Explain rather than list: say what a thing is and why it matters,
+  in the speaker's own reasoning, so the notes can be understood weeks later.
+  Scale to the substance: roughly one bullet per 150 to 300 words of real
+  teaching, fewer where the speaker digresses. Never pad, and never shrink a
+  dense lecture to an abstract. exam_notes holds only what was actually flagged as
+  examinable; leave it out if nothing was.
+- For any other type, scale the notes to the material: roughly one bullet per
+  200 to 400 words of transcript, spread over the sections that have content.
 - Omit a section entirely when it has no real content. Never emit filler such as
   "No decisions identified".
 - Keep each bullet to one clear idea, with no leading dash or number.
 - When a bullet explains a term, a concept or a named thing, open with that name
   in **bold** and follow it with the explanation. Use bold only for that, never
   for a whole sentence: it is what makes a long set of notes scannable, and it
-  stops working the moment half the page is bold. No other formatting.
+  stops working the moment half the page is bold. No other formatting. Review
+  questions take no bold: just "Question ? → short answer".
 - If the transcript is too short or unintelligible, still return valid JSON with
   whatever can honestly be extracted.
 
@@ -233,6 +325,136 @@ def merge_results(results: list[dict]) -> dict:
         "language": languages_seen[0] if languages_seen else languages.AUTO,
         "sections": {key: sections[key] for key in ordered},
         "labels": {k: v for k, v in labels.items() if v},
+    }
+
+
+# -- Carrying notes from one part to the next -----------------------------------
+
+_BOLD_LEAD = re.compile(r"^\*\*([^*\n]{2,80})\*\*")
+
+
+def notes_as_text(
+    sections: dict[str, list[str]],
+    budget: int,
+    *,
+    skip: set[str] = frozenset(),
+    bullet_chars: int = 240,
+) -> str:
+    """Sections as compact plain text for a prompt, within `budget` characters.
+
+    Bullets are clipped rather than whole sections dropped: the opening of a
+    bullet - its bold term and the start of the explanation - is what tells the
+    model a point is already covered.
+    """
+    lines: list[str] = []
+    for key, bullets in sections.items():
+        if key in skip or not bullets:
+            continue
+        lines.append(f"[{key}]")
+        for bullet in bullets:
+            clipped = bullet if len(bullet) <= bullet_chars else bullet[: bullet_chars - 1] + "…"
+            lines.append(f"- {clipped}")
+    text = "\n".join(lines)
+    if len(text) <= budget:
+        return text
+    return text[:budget].rsplit("\n", 1)[0]
+
+
+def notes_digest(parts: list[dict], budget: int) -> str:
+    """What a part needs to know about the parts before it.
+
+    Every term the notes have explained so far, by name - cheap, and the thing
+    that stops a concept being introduced twice - then the previous part's
+    notes themselves, so the thread carries on where it left off.
+    """
+    if not parts or budget <= 0:
+        return ""
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        for bullets in part.get("sections", {}).values():
+            for bullet in bullets:
+                found = _BOLD_LEAD.match(bullet)
+                if found and found.group(1).lower() not in seen:
+                    seen.add(found.group(1).lower())
+                    terms.append(found.group(1).strip())
+
+    covered = ""
+    if terms:
+        covered = "Terms already covered: " + "; ".join(terms)
+        if len(covered) > budget // 3:
+            # The latest terms are the likeliest to come up again next.
+            covered = "Terms already covered: …" + covered[-(budget // 3):]
+
+    # Less the headings that join the two pieces.
+    previous = notes_as_text(parts[-1].get("sections", {}), budget - len(covered) - 40)
+    return "\n\n".join(piece for piece in (covered, f"Notes on the previous part:\n{previous}") if piece)
+
+
+def build_synthesis_prompt(merged: dict, language: str, notes: str) -> str:
+    """The sections that need the whole recording, from the joined notes."""
+    content_type = merged.get("type", "OTHER")
+    keys = SYNTHESIS_KEYS.get(content_type, ["summary"])
+    # A whole lecture has more worth remembering than one part of it.
+    whole = {**LECTURE_GUIDE, "key_takeaways": "the 5 to 10 things to remember above all, each in one sentence"}
+    guide = "\n".join(
+        f"- {key}: {whole.get(key, 'the main points of the whole recording, in order')}" for key in keys
+    )
+    shape = ", ".join(f'"{key}": ["bullet"]' for key in keys)
+    labels = ", ".join(f'"{key}": "section name in the notes\' language"' for key in keys)
+    return f"""Below are notes on one {content_type} recording, written part by part and
+joined. Write the parts of the notes that need the whole recording in view.
+
+{_language_clause(language)}
+
+Return exactly this JSON shape:
+{{
+  "title": "a short, specific title for the whole recording",
+  "sections": {{ {shape} }},
+  "labels": {{ {labels} }}
+}}
+
+What each section holds:
+{guide}
+
+Rules:
+- Use only what the notes say. Never add a fact, a definition or a conclusion
+  that is not in them.
+- Cover the whole recording, not just its opening.
+- Keep each bullet to one clear idea, with no leading dash or number. Bold only
+  a term a bullet opens with, as **term**.
+
+Notes:
+{TRIPLE_QUOTE}
+{notes}
+{TRIPLE_QUOTE}"""
+
+
+def apply_synthesis(merged: dict, parsed: dict, language: str) -> dict:
+    """Put the whole-recording sections and title into the joined notes.
+
+    Only what the synthesis actually wrote replaces anything: a key it left
+    empty keeps the per-part version, which is no worse than before.
+    """
+    content_type = merged.get("type", "OTHER")
+    synthesis = normalize_result(parsed, requested_language=language, transcript="")
+    sections = dict(merged["sections"])
+    labels = dict(merged.get("labels", {}))
+    for key in SYNTHESIS_KEYS.get(content_type, []):
+        if synthesis["sections"].get(key):
+            sections[key] = synthesis["sections"][key]
+            if synthesis["labels"].get(key):
+                labels.setdefault(key, synthesis["labels"][key])
+
+    plan = SECTION_PLANS.get(content_type, [])
+    ordered = sorted(sections, key=lambda key: (plan.index(key) if key in plan else len(plan), key))
+    title = parsed.get("title") if isinstance(parsed.get("title"), str) else ""
+    return {
+        **merged,
+        "title": (title.strip() or merged["title"])[:200],
+        "sections": {key: sections[key] for key in ordered},
+        "labels": labels,
     }
 
 
@@ -440,10 +662,20 @@ async def summarize_in_windows(
     tokens into the same characters settles on a smaller window by itself.
     A window that fails any other way is counted and skipped, because losing
     one stretch beats discarding the rest.
+
+    Windows are not summarized blind. Each one is shown the notes the earlier
+    ones produced, and keeps the first window's type and language, so the
+    parts join up instead of repeating each other. Once every window is done,
+    one more request writes what needs the whole recording at once - the
+    title, the overview, what to remember - from the joined notes. That last
+    step is an improvement, not a requirement: if it fails, the joined notes
+    are returned as they are.
     """
     pending = deque(split_for_window(transcript, window_chars))
     if len(pending) > 1:
         logger.info("Transcript split into %d windows", len(pending))
+    # The notes carried forward have to leave the window most of the request.
+    carry_budget = min(settings.NOTES_CARRY_CHARS, window_chars // 4)
 
     parts: list[dict] = []
     failed = 0
@@ -457,8 +689,18 @@ async def summarize_in_windows(
         budget -= 1
         window = pending.popleft()
         total += 1
+        first = parts[0] if parts else None
+        prompt = build_prompt(
+            window,
+            # "auto" asked of every window let a part with a long quotation
+            # in it switch languages; the first window has already settled it.
+            first["language"] if first and language == languages.AUTO else language,
+            content_type=first["type"] if first else None,
+            part=(len(parts) + 1, len(parts) + len(pending) + 1),
+            previous=notes_digest(parts, carry_budget),
+        )
         try:
-            answer = await call(build_prompt(window, language))
+            answer = await call(prompt)
         except (GeminiError, groq.GroqError) as exc:
             halves = (
                 split_for_window(window, max(len(window) // 2, min_window_chars))
@@ -484,7 +726,32 @@ async def summarize_in_windows(
             normalize_result(parsed, requested_language=language, transcript=window)
         )
 
-    return merge_results(parts), failed, total, last_error
+    merged = merge_results(parts)
+    if len(parts) > 1 and merged:
+        merged = await synthesize(merged, language, call=call, budget=window_chars)
+    return merged, failed, total, last_error
+
+
+async def synthesize(merged: dict, language: str, *, call, budget: int) -> dict:
+    """Rewrite the whole-recording sections of joined notes; keep them on failure."""
+    content_type = merged.get("type", "OTHER")
+    # The review questions and the per-part versions of what is being rewritten
+    # add length and nothing the synthesis needs.
+    skip = {"review_questions", *SYNTHESIS_KEYS.get(content_type, [])}
+    notes = notes_as_text(merged["sections"], budget, skip=skip)
+    if not notes:
+        return merged
+    if language == languages.AUTO and merged.get("language") != languages.AUTO:
+        language = merged["language"]
+    try:
+        parsed = parse_json_object(await call(build_synthesis_prompt(merged, language, notes)))
+    except (GeminiError, groq.GroqError) as exc:
+        logger.warning("Synthesis failed, keeping the joined notes: %s", exc)
+        return merged
+    if not parsed:
+        logger.warning("Synthesis produced unparseable output, keeping the joined notes")
+        return merged
+    return apply_synthesis(merged, parsed, language)
 
 
 async def summarize(transcript: str, language: str = languages.AUTO) -> dict:

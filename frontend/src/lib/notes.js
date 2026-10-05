@@ -145,6 +145,15 @@ export const inlineRuns = (text) => {
   return runs;
 };
 
+/**
+ * A review question bullet ("Question ? → answer") as {question, answer}, or
+ * null when it is not written that way and should show as a plain bullet.
+ */
+export const splitQuestion = (text) => {
+  const found = /^(.+?)\s+(?:→|->|=>)\s+(.+)$/s.exec(typeof text === 'string' ? text : '');
+  return found ? { question: found[1].trim(), answer: found[2].trim() } : null;
+};
+
 /** The same text with its formatting removed, for previews and plain contexts. */
 export const stripInline = (text) =>
   inlineRuns(text)

@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from './ui/input';
+import { BulletText } from './BulletText';
 import { ExportButton } from './ExportButton';
 import { deleteNote, errorMessage, getAllTags, getNotes } from '../services/api';
 import { languageName, sectionEntries, sectionLabel } from '../lib/notes';
@@ -142,7 +143,9 @@ const NoteCard = ({ note, onDelete, isExpanded, onToggle, isDeleting }) => {
                           <span
                             className={`mt-[7px] w-1 h-1 rounded-full flex-shrink-0 ${BULLET_CLASS}`}
                           />
-                          <span>{item}</span>
+                          <span>
+                            <BulletText sectionKey={key} text={item} />
+                          </span>
                         </li>
                       ))}
                     </ul>

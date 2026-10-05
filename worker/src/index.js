@@ -74,7 +74,9 @@ async function handleTranscribe(request, env, ctx, cors) {
       audio,
       mimeType,
       language: params.get('language') || 'auto',
-      context: (params.get('context') || '').slice(0, 2000),
+      // The end, not the start: context is the text just before this chunk,
+      // and the prompt only uses its last stretch.
+      context: (params.get('context') || '').slice(-2000),
       env,
       deadline: started + BUDGET_MS,
       waitUntil: (promise) => ctx.waitUntil(promise),

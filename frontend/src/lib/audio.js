@@ -420,12 +420,53 @@ export function findQuietCut(samples, idealEnd, searchSeconds = 12) {
 }
 
 /**
+ * Capture segments handed over one at a time, as an async iterable.
+ *
+ * The recorder pushes each segment the moment it closes, and streamWavChunks
+ * pulls from the other end, so transcription can work through a lecture while
+ * it is still being recorded. `close()` says no more segments are coming,
+ * which is what lets the chunker flush the audio it was holding back.
+ */
+export function createSegmentQueue() {
+  const buffered = [];
+  const waiting = [];
+  let closed = false;
+
+  return {
+    push(segment) {
+      if (closed || !segment) return;
+      const next = waiting.shift();
+      if (next) next({ value: segment, done: false });
+      else buffered.push(segment);
+    },
+    close() {
+      closed = true;
+      while (waiting.length) waiting.shift()({ value: undefined, done: true });
+    },
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => {
+          if (buffered.length) return Promise.resolve({ value: buffered.shift(), done: false });
+          if (closed) return Promise.resolve({ value: undefined, done: true });
+          return new Promise((resolve) => waiting.push(resolve));
+        },
+      };
+    },
+  };
+}
+
+/**
  * Yield audio chunks of at most `chunkSeconds` from one or more capture segments.
  *
  * Each segment is decoded only when its turn comes and is released as soon as
  * it has been emitted, so a three hour recording costs no more memory than a
  * five minute one. Audio left at the end of a segment is carried into the next
  * one, so a segment boundary does not show up as a stub chunk mid-sentence.
+ *
+ * `source` is a segment, an array of them, or an async iterable such as
+ * createSegmentQueue() that is still being filled. The cut points are the same
+ * either way, so a retry over the finished array resumes exactly where a live
+ * run stopped.
  *
  * Consume it with `for await`; the caller is expected to upload each chunk
  * before asking for the next, which is also what keeps encoded WAVs from
@@ -439,16 +480,31 @@ export async function* streamWavChunks(
   source,
   { chunkSeconds, format = 'wav', skipChunks = 0 } = {},
 ) {
-  const segments = (Array.isArray(source) ? source : [source]).filter(Boolean);
-  if (!segments.length) throw new AudioDecodeError('The recording is empty.', 'empty');
+  const live = typeof source?.[Symbol.asyncIterator] === 'function';
+  const segments = live ? source : (Array.isArray(source) ? source : [source]).filter(Boolean);
+  if (!live && !segments.length) throw new AudioDecodeError('The recording is empty.', 'empty');
 
   const seconds = chunkSeconds || chunkSecondsForConnection();
   const chunkSamples = Math.max(1, Math.floor(seconds * TARGET_SAMPLE_RATE));
   let carry = null;
   let index = 0;
+  let decodedAny = false;
 
-  for (let segment = 0; segment < segments.length; segment += 1) {
-    let samples = await decodeToMono16k(segments[segment]);
+  // Shared by the full chunks and the final flush.
+  async function* emit(slice) {
+    index += 1;
+    if (index <= skipChunks) return;
+    const blob = await encodeChunk(slice, format);
+    yield { blob, seconds: slice.length / TARGET_SAMPLE_RATE, index };
+    // encodeWav walks every sample synchronously; on a phone a long recording
+    // would otherwise lock the interface for seconds at a time.
+    await yieldToUI();
+  }
+
+  for await (const segment of segments) {
+    if (!segment) continue;
+    let samples = await decodeToMono16k(segment);
+    decodedAny = true;
 
     if (carry && carry.length) {
       const joined = new Float32Array(carry.length + samples.length);
@@ -458,28 +514,24 @@ export async function* streamWavChunks(
       carry = null;
     }
 
-    const isLast = segment === segments.length - 1;
     let start = 0;
-
-    while (samples.length - start >= chunkSamples || (isLast && start < samples.length)) {
-      let end = Math.min(start + chunkSamples, samples.length);
+    while (samples.length - start >= chunkSamples) {
+      let end = start + chunkSamples;
       // Only hunt for a quiet boundary when there is more audio after this chunk.
       if (end < samples.length) end = findQuietCut(samples, end);
       // Both encoders copy into their own buffers, so a view is enough here.
       const slice = samples.subarray(start, end);
-      index += 1;
       start = end;
-      if (index <= skipChunks) continue;
-      const blob = await encodeChunk(slice, format);
-      yield { blob, seconds: slice.length / TARGET_SAMPLE_RATE, index };
-      // encodeWav walks every sample synchronously; on a phone a long recording
-      // would otherwise lock the interface for seconds at a time.
-      await yieldToUI();
+      yield* emit(slice);
     }
 
+    // Held back until the next segment arrives, or flushed below if none does.
     // A copy, not a view: a view would pin the whole decoded segment in memory.
-    carry = isLast || start >= samples.length ? null : samples.slice(start);
+    carry = start >= samples.length ? null : samples.slice(start);
   }
+
+  if (!decodedAny) throw new AudioDecodeError('The recording is empty.', 'empty');
+  if (carry && carry.length) yield* emit(carry);
 }
 
 /**

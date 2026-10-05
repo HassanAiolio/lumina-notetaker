@@ -105,6 +105,9 @@ class Settings:
     # Below it the problem is not the size, and splitting further only makes
     # the notes choppier.
     MIN_WINDOW_CHARS: int = _int("MIN_WINDOW_CHARS", 2_500)
+    # How much of the notes so far each window is shown, so it adds to them
+    # rather than repeating them. Also capped at a quarter of the window.
+    NOTES_CARRY_CHARS: int = _int("NOTES_CARRY_CHARS", 4_000)
 
     # Per-user sliding-window rate limits: (requests, window_seconds)
     RATE_LIMIT_AI: tuple[int, int] = (_int("RATE_LIMIT_AI_REQUESTS", 30), _int("RATE_LIMIT_AI_WINDOW", 60))
