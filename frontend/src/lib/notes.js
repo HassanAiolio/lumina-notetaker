@@ -159,3 +159,81 @@ export const stripInline = (text) =>
   inlineRuns(text)
     .map((run) => run.text)
     .join('');
+
+// ── Library and revision helpers ────────────────────────────────────────────
+
+/** What the note types are called in the library filter. */
+export const TYPE_LABELS = {
+  LECTURE: 'Lectures',
+  MEETING: 'Meetings',
+  INTERVIEW: 'Interviews',
+  BRAINSTORM: 'Brainstorms',
+  OTHER: 'Other',
+};
+
+/** One line to recognise a note by in a list: its overview, else its first point. */
+export const notePreview = (note) => {
+  const sections = note?.sections || {};
+  const lead = ['overview', 'summary', 'key_takeaways']
+    .map((key) => (Array.isArray(sections[key]) ? sections[key][0] : ''))
+    .find(Boolean);
+  return stripInline(lead || sectionEntries(note)[0]?.[1]?.[0] || '');
+};
+
+/** Points to read and questions to revise from, for the list's meta line. */
+export const noteCounts = (note) => {
+  const questions = note?.sections?.review_questions?.length || 0;
+  return { points: bulletCount(note) - questions, questions, cards: buildDeck(note).length };
+};
+
+const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+/**
+ * Notes grouped the way you look for them: today, yesterday, this week, then
+ * by month. Expects them newest first, as the API returns them.
+ */
+export const groupByDate = (notes, now = new Date()) => {
+  const today = startOfDay(now).getTime();
+  const DAY = 86400000;
+  const groups = [];
+  const labelFor = (note) => {
+    const created = new Date(note.created_at);
+    if (Number.isNaN(created.getTime())) return 'Earlier';
+    const day = startOfDay(created).getTime();
+    if (day >= today) return 'Today';
+    if (day >= today - DAY) return 'Yesterday';
+    if (day >= today - 6 * DAY) return 'This week';
+    return created.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  };
+  notes.forEach((note) => {
+    const label = labelFor(note);
+    const last = groups[groups.length - 1];
+    if (last && last.label === label) last.notes.push(note);
+    else groups.push({ label, notes: [note] });
+  });
+  return groups;
+};
+
+// "**Term** : explanation", with a colon, dash or en/em dash after the term.
+const TERM_LEAD = /^\*\*(.+?)\*\*\s*[:—–-]\s*(.+)$/s;
+
+/**
+ * Flashcards for a note: its review questions, then every defined term, then
+ * every explained concept. All of it comes from the note itself, so revising
+ * never tests anything the lecture did not say.
+ */
+export const buildDeck = (note) => {
+  const sections = note?.sections || {};
+  const cards = [];
+  (sections.review_questions || []).forEach((text, index) => {
+    const pair = splitQuestion(text);
+    if (pair) cards.push({ id: `q${index}`, kind: 'question', front: pair.question, back: pair.answer });
+  });
+  ['definitions', 'key_concepts', 'methods'].forEach((key) => {
+    (sections[key] || []).forEach((text, index) => {
+      const found = TERM_LEAD.exec(typeof text === 'string' ? text.trim() : '');
+      if (found) cards.push({ id: `${key}${index}`, kind: key, front: found[1].trim(), back: found[2].trim() });
+    });
+  });
+  return cards;
+};

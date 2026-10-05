@@ -96,7 +96,9 @@ class FakeCollection:
         return None
 
     def find(self, query, projection=None):
-        return FakeCursor([d for d in self.docs if _matches(d, query)])
+        hidden = {k for k, v in (projection or {}).items() if v == 0 and k != "_id"}
+        docs = [{k: v for k, v in d.items() if k not in hidden} for d in self.docs if _matches(d, query)]
+        return FakeCursor(docs)
 
     async def count_documents(self, query):
         return len([d for d in self.docs if _matches(d, query)])
@@ -344,3 +346,30 @@ def test_paused_database_reports_503_not_500(client, fake_db, monkeypatch):
 
 def test_limit_is_capped(client):
     assert client.get("/api/notes", params={"limit": 5000}).status_code == 422
+
+
+# ── Listing for the library view ──────────────────────────────────────────────
+
+def test_brief_listing_leaves_out_the_transcript(client):
+    note = make_note(client, raw_transcript="Deux heures de cours " * 50)
+    full = client.get("/api/notes").json()["items"][0]
+    brief = client.get("/api/notes", params={"brief": "true"}).json()["items"][0]
+    assert full["raw_transcript"]
+    assert brief["raw_transcript"] == ""
+    assert brief["sections"] == full["sections"]  # previews still have what they need
+    # Opening the note still gets everything.
+    assert client.get(f"/api/notes/{note['id']}").json()["raw_transcript"]
+
+
+def test_notes_can_be_filtered_by_type(client):
+    make_note(client, title="Cours", type="LECTURE")
+    make_note(client, title="Point", type="MEETING")
+    page = client.get("/api/notes", params={"type": "lecture"}).json()
+    assert [n["title"] for n in page["items"]] == ["Cours"]
+
+
+def test_a_blank_rename_is_ignored(client):
+    note = make_note(client, title="Thermodynamique")
+    assert client.patch(f"/api/notes/{note['id']}", json={"title": "   "}).status_code == 400
+    renamed = client.patch(f"/api/notes/{note['id']}", json={"title": "  Thermo, cours 3 "}).json()
+    assert renamed["title"] == "Thermo, cours 3"

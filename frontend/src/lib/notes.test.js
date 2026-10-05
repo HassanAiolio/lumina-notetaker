@@ -7,7 +7,8 @@
  * exactly as written rather than silently eaten.
  */
 import {
-  splitQuestion, inlineRuns, stripInline } from './notes';
+  buildDeck, groupByDate, inlineRuns, noteCounts, notePreview, splitQuestion, stripInline,
+} from './notes';
 
 const plain = (text) => inlineRuns(text).map((r) => r.text).join('');
 
@@ -72,5 +73,50 @@ describe('splitQuestion', () => {
   it('leaves a bullet without an answer alone', () => {
     expect(splitQuestion('Une question sans réponse ?')).toBeNull();
     expect(splitQuestion(undefined)).toBeNull();
+  });
+});
+
+describe('library helpers', () => {
+  const note = {
+    created_at: '2026-10-05T09:00:00Z',
+    sections: {
+      overview: ['**Thermo** : le cours entier'],
+      definitions: ['**Entropie** : mesure du désordre', 'Une phrase sans terme'],
+      key_concepts: ['**Deuxième principe** — l’entropie ne décroît pas'],
+      review_questions: ['Que mesure l’entropie ? → Le désordre', 'Sans réponse ?'],
+    },
+  };
+
+  it('previews a note by its overview, without the formatting', () => {
+    expect(notePreview(note)).toBe('Thermo : le cours entier');
+    expect(notePreview({ sections: { definitions: ['**A** : b'] } })).toBe('A : b');
+    expect(notePreview({})).toBe('');
+  });
+
+  it('builds a deck from questions, defined terms and explained concepts', () => {
+    expect(buildDeck(note)).toEqual([
+      { id: 'q0', kind: 'question', front: 'Que mesure l’entropie ?', back: 'Le désordre' },
+      { id: 'definitions0', kind: 'definitions', front: 'Entropie', back: 'mesure du désordre' },
+      { id: 'key_concepts0', kind: 'key_concepts', front: 'Deuxième principe', back: 'l’entropie ne décroît pas' },
+    ]);
+  });
+
+  it('counts points apart from questions', () => {
+    expect(noteCounts(note)).toEqual({ points: 4, questions: 2, cards: 3 });
+  });
+
+  it('groups notes by how recent they are', () => {
+    const now = new Date(2026, 9, 5, 18, 0);
+    const at = (d) => ({ created_at: d.toISOString() });
+    const groups = groupByDate(
+      [at(new Date(2026, 9, 5, 9)), at(new Date(2026, 9, 4, 9)), at(new Date(2026, 9, 1, 9)), at(new Date(2026, 7, 20))],
+      now,
+    );
+    expect(groups.map((g) => [g.label.replace(/\s+\d{4}$/, ''), g.notes.length]).slice(0, 3)).toEqual([
+      ['Today', 1],
+      ['Yesterday', 1],
+      ['This week', 1],
+    ]);
+    expect(groups).toHaveLength(4);
   });
 });

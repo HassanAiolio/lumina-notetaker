@@ -375,37 +375,40 @@ The default model is `large-v3-turbo`; `--model large-v3` is more accurate on ha
 several times slower, and `--model small` suits a machine with no usable GPU. Note this is a
 local tool, not something the deployed backend can do — a free Render instance has no GPU.
 
-### The 3D scene reacts to your voice
+### The 3D scene: one rig, baked in Blender
 
-The notebook model ships a rigged, 21-channel page animation that nothing was
-playing. Rather than loop it decoratively, its playhead is driven by the live
-microphone amplitude that `useAudioRecorder` already computes for the level
-meter — so the pages ruffle in time with how loudly you are speaking, and the
-pen writes across the page while a transcript is being produced. The amplitude
-travels through a ref, not state, so a 60 Hz signal never re-renders React.
+The notebook, the pen and the paper airplane are a single rigged model,
+`frontend/public/models/desk.glb`, built from scratch by a Blender script. The
+pen is a child of the book and its nib follows the very path the ink is laid
+along, so the browser never steers anything: it only picks which clip plays.
+
+| Clip      | What happens                                                        |
+|-----------|---------------------------------------------------------------------|
+| `idle`    | the pen hovers, capped, over the page; the page breathes            |
+| `to_book` | the pen uncaps, posts the cap on its end and lands on line one      |
+| `write`   | seven lines of handwriting, then the page turns (loops seamlessly)  |
+| `to_rest` | `to_book` backwards                                                 |
+| `fly`     | the written page peels off, folds into a dart and flies away        |
+
+While you record, your voice sets how fast the pen writes; while the transcript
+and notes are made it writes on; when the notes are ready the page becomes the
+plane. The ink is revealed in the shader: every ink vertex carries the time the
+nib passes it, and the material hides what the clip has not reached yet.
 
 The scene holds a still composition under `prefers-reduced-motion`, stops
-rendering when the tab is hidden or you are on the Notes tab, and every
-interpolation is expressed per second rather than per frame, so it runs at the
-same speed on a 120 Hz display as on a 60 Hz one.
+rendering when the tab is hidden or you are on the Notes tab, and every rate is
+per second rather than per frame. The logic is in `Canvas3D/deskScene.js`
+(plain JS); `Scene3D.jsx` only wraps it for React.
 
-### Optimising the 3D models
-
-The Sketchfab originals total 7.7 MB — mostly five uncompressed 1024² PNGs on a
-notebook that renders a few hundred pixels wide. They are compressed to 0.53 MB
-(93% smaller, 27 MB of VRAM down to 5.8 MB) with no visible difference:
+### Rebuilding the 3D model
 
 ```bash
-npx @gltf-transform/cli optimize models-src/notebook.orig.glb   public/models/notebook.glb   --texture-compress webp --texture-size 512 --compress meshopt --simplify false
+"C:/Program Files/Blender Foundation/Blender 5.2/blender.exe" -b --python frontend/models-src/build_desk.py
 ```
 
-`--simplify false` matters: the notebook is a skinned mesh and simplification
-distorts the rig. The output needs `EXT_meshopt_compression` and
-`EXT_texture_webp`, so `GLTFLoader` is given a `MeshoptDecoder`; both extensions
-are supported by the pinned three.js version.
-
-Originals live in `frontend/models-src/` (git-ignored — they are in history at
-commit `d5f5098` if you need them back).
+It writes `models-src/desk.raw.glb` (~1.6 MB, git-ignored) and packs it with
+gltfpack (meshopt) into `public/models/desk.glb` (~0.35 MB). The pen is the one
+outside asset, credited in `models-src/CREDITS.md` (CC BY 4.0).
 
 ### Stable keys, localized labels
 

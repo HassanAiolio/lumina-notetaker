@@ -85,9 +85,10 @@ android-sdk/
 !.env.example
 !*.env.example
 
-# Source 3D models kept for re-optimising; the compressed ones in
-# frontend/public/models are what ships. See README for the command.
-frontend/models-src/
+# The 3D scene is built by frontend/models-src/build_desk.py, which is committed
+# with its one source model. Only its unpacked intermediate export is not.
+frontend/models-src/desk.raw.glb
+frontend/models-src/__pycache__/
 
 # Cloudflare Worker local secrets and build cache
 worker/.dev.vars

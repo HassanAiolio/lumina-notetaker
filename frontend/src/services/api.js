@@ -199,10 +199,13 @@ export const summarizeTranscript = async (transcript, language = 'auto') =>
 
 export const saveNote = async (note) => (await client.post('/notes', note)).data;
 
-export const getNotes = async ({ search, tag, limit = 30, offset = 0 } = {}) => {
+// `brief` leaves the transcripts out of a listing; getNote has the whole note.
+export const getNotes = async ({ search, tag, type, brief = false, limit = 30, offset = 0 } = {}) => {
   const params = { limit, offset };
   if (search) params.search = search;
   if (tag) params.tag = tag;
+  if (type) params.type = type;
+  if (brief) params.brief = true;
   return (await client.get('/notes', { params })).data;
 };
 

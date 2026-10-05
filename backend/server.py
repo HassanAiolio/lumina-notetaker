@@ -254,10 +254,18 @@ async def create_note(note: NoteCreate, user: User = Depends(current_user)):
 async def list_notes(
     search: str | None = Query(None, max_length=200),
     tag: str | None = Query(None, max_length=40),
+    note_type: str | None = Query(None, alias="type", max_length=20),
+    brief: bool = Query(False),
     limit: int = Query(30, ge=1, le=settings.MAX_NOTES_PAGE),
     offset: int = Query(0, ge=0),
     user: User = Depends(current_user),
 ):
+    """A page of the user's notes, newest first.
+
+    `brief` leaves out the transcripts. A library of lectures is mostly
+    transcript - two hours is over 100k characters - and a list has no use for
+    them, so the app asks for them only when a note is opened.
+    """
     query: dict = {"user_id": user.id}
     if search and search.strip():
         # Regex rather than $text so partial words match while typing; escaped
@@ -270,11 +278,13 @@ async def list_notes(
         ]
     if tag:
         query["tags"] = tag.strip().lower()
+    if note_type:
+        query["type"] = note_type.strip().upper()
 
     notes_collection = db.get_db().notes
     total = await notes_collection.count_documents(query)
     cursor = (
-        notes_collection.find(query, {"_id": 0})
+        notes_collection.find(query, {"_id": 0, "raw_transcript": 0} if brief else {"_id": 0})
         .sort("created_at", -1)
         .skip(offset)
         .limit(limit)

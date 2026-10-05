@@ -116,6 +116,14 @@ class NoteUpdate(BaseModel):
             return None
         return clean_tag_list(value)
 
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, value: str | None) -> str | None:
+        # A blank rename is ignored rather than leaving a note with no name.
+        if value is None:
+            return None
+        return value.strip()[:200] or None
+
 
 class NoteResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")

@@ -329,3 +329,11 @@ h4 {
     color: #c4b5fd;
   }
 }
+
+/* A horizontal strip that scrolls without showing a bar (the reader's index). */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

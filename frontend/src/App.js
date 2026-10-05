@@ -57,7 +57,10 @@ function Workspace() {
   const [sessionActive, setSessionActive] = useState(false);
   const [airplaneFlying, setAirplaneFlying] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [activeTab, setActiveTab] = useState('record');
+  // A link to a saved note (#note=<id>) opens on the Notes tab.
+  const [activeTab, setActiveTab] = useState(() =>
+    window.location.hash.startsWith('#note=') ? 'history' : 'record',
+  );
   const [isOnline, setIsOnline] = useState(() => navigator.onLine !== false);
 
   const airplaneTimerRef = useRef(null);
@@ -185,7 +188,6 @@ function Workspace() {
             isRecording={isRecording}
             isTranscribing={isTranscribing}
             isSummarizing={isSummarizing}
-            showResult={!!currentNote}
             airplaneFlying={airplaneFlying}
             audioLevelRef={audioLevelRef}
             active={activeTab === 'record'}
