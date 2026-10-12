@@ -8,6 +8,8 @@ import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
 import { LanguageSelect } from './LanguageSelect';
 import { SlidesPicker } from './Slides';
+import { DeviceRecordings } from './DeviceRecordings';
+import { useAuth } from '../contexts/AuthContext';
 import { useAudioRecorder } from '../hooks/useAudioRecorder';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
 import {
@@ -19,6 +21,13 @@ import {
   toSingleWav,
 } from '../lib/audio';
 import { freshProgress, isCancel, transcribeSegments } from '../lib/transcription';
+import {
+  deleteRecording,
+  keepRecording,
+  listRecordings,
+  loadRecording,
+  pruneRecordings,
+} from '../lib/recordingStore';
 import { errorMessage } from '../services/api';
 import { languageName } from '../lib/notes';
 
@@ -85,14 +94,30 @@ export const Recorder = ({
   // Joining segments into one file decodes the whole recording, so it is not
   // instant on a long one and needs to say so.
   const [joining, setJoining] = useState(null);
+  // Discard asks twice: one stray tap used to throw away a whole lecture.
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+
+  // Recordings kept on this device (lib/recordingStore), and the one whose
+  // audio is being read back, if any.
+  const { user } = useAuth();
+  const owner = user?.id || '';
+  const [stored, setStored] = useState([]);
+  const [working, setWorking] = useState(null);
+  const refreshStored = useCallback(async () => setStored(await listRecordings(owner)), [owner]);
+  useEffect(() => {
+    refreshStored();
+  }, [refreshStored]);
 
   // The transcription run in progress while recording: segments go into its
   // queue as they close, and it works through them as the lecture goes on.
   const liveRef = useRef(null);
+  // Where the recording under way is being kept, second by second.
+  const keepRef = useRef(null);
 
   const recorder = useAudioRecorder({
     levelRef: audioLevelRef,
     onSegment: (blob) => liveRef.current?.queue.push(blob),
+    onData: (blob, segment) => keepRef.current?.add(blob, segment),
     onMaxDuration: () => {
       toast.warning('Maximum recording length reached — wrapping up.');
       handleStop();
@@ -149,11 +174,16 @@ export const Recorder = ({
     onSessionChange?.(recorder.isRecording || busy);
   }, [busy, onSessionChange, recorder.isRecording]);
 
+  useEffect(() => {
+    if (recorder.isRecording && recorder.seconds) keepRef.current?.update({ seconds: recorder.seconds });
+  }, [recorder.isRecording, recorder.seconds]);
+
   useEffect(
     () => () => {
       abortRef.current?.abort();
       liveRef.current?.controller.abort();
       liveRef.current?.queue.close();
+      keepRef.current?.close();
     },
     [],
   );
@@ -170,6 +200,8 @@ export const Recorder = ({
    */
   const finishRecording = useCallback(
     (recording, progress) => {
+      recording.keep?.update({ progress, complete: !!progress.context });
+      recording.keep?.close().then(refreshStored);
       // context only ever holds text a chunk returned, so empty means silence.
       if (!progress.context) {
         setPendingRecording({ ...recording, progress });
@@ -187,7 +219,7 @@ export const Recorder = ({
         { description: 'Review it, add slides if you have them, then Generate notes.' },
       );
     },
-    [onDetectedLanguage],
+    [onDetectedLanguage, refreshStored],
   );
 
   /**
@@ -198,6 +230,8 @@ export const Recorder = ({
    */
   const failRecording = useCallback((recording, err, fallbackProgress) => {
     const progress = err?.progress || fallbackProgress;
+    recording.keep?.update({ progress });
+    recording.keep?.close().then(refreshStored);
     setPendingRecording({ ...recording, progress });
     if (isCancel(err)) {
       setPipelineError('Transcription stopped. The text so far is kept; retry to do the rest.');
@@ -210,7 +244,7 @@ export const Recorder = ({
     } else {
       setPipelineError(errorMessage(err, 'Transcription failed.'));
     }
-  }, []);
+  }, [refreshStored]);
 
   /** Transcribe a finished recording, from wherever an earlier run stopped. */
   const runTranscription = useCallback(
@@ -237,7 +271,10 @@ export const Recorder = ({
           language,
           progress: start,
           signal: controller.signal,
-          onChunk,
+          onChunk: (text, chunkProgress) => {
+            recording.keep?.chunk(text, chunkProgress);
+            onChunk(text, chunkProgress);
+          },
         });
         finishRecording(recording, progress);
       } catch (err) {
@@ -258,7 +295,7 @@ export const Recorder = ({
    * used to wait for stop and then do the whole recording in series - half an
    * hour of chunks one after another for a two hour lecture.
    */
-  const startLive = useCallback(() => {
+  const startLive = useCallback((keep) => {
     const controller = new AbortController();
     const live = {
       queue: createSegmentQueue(),
@@ -277,6 +314,7 @@ export const Recorder = ({
       retries: 2,
       onChunk: (text, progress) => {
         live.progress = progress;
+        keep?.chunk(text, progress);
         onChunk(text, progress);
       },
     }).catch((err) => {
@@ -319,9 +357,20 @@ export const Recorder = ({
     setPendingRecording(null);
     setLiveStalled(false);
     setProgress({ done: 0, total: 0 });
+    setConfirmDiscard(false);
     speech.reset();
+    // Room for this one among the recordings kept on the device.
+    await pruneRecordings();
+    const keep = keepRecording({
+      owner,
+      onError: () =>
+        toast.warning('This device has no room left to keep a copy of the recording.', {
+          description: 'Recording and transcription carry on as normal.',
+        }),
+    });
+    keepRef.current = keep;
     // Ready before the recorder starts, so no segment can arrive to nobody.
-    startLive();
+    startLive(keep);
     const started = await recorder.start();
     if (started) {
       speech.start(localeFor(language));
@@ -329,8 +378,11 @@ export const Recorder = ({
       liveRef.current?.controller.abort();
       liveRef.current?.queue.close();
       liveRef.current = null;
+      keepRef.current = null;
+      keep.close().then(() => deleteRecording(keep.id));
     }
-  }, [language, localeFor, recorder, speech, startLive]);
+    refreshStored();
+  }, [language, localeFor, owner, recorder, refreshStored, speech, startLive]);
 
   const handleStop = useCallback(async () => {
     // The button stays live until the recorder has finished closing, and a
@@ -340,15 +392,22 @@ export const Recorder = ({
     try {
       speech.stop();
       // Stopping banks the final segment, which goes to the live run's queue.
-      const recording = await recorder.stop();
+      const stopped = await recorder.stop();
       const live = liveRef.current;
       liveRef.current = null;
-      if (!recording) {
+      // Only now: the recorder hands over its last second while stopping.
+      const keep = keepRef.current;
+      keepRef.current = null;
+      if (!stopped) {
         live?.controller.abort();
         live?.queue.close();
+        keep?.close().then(() => deleteRecording(keep.id));
         setPipelineError('Nothing was recorded. Check that your microphone is working.');
         return;
       }
+      keep?.update({ seconds: stopped.seconds });
+      keep?.flush();
+      const recording = { ...stopped, id: keep?.id, keep };
       setPendingRecording(recording);
       if (live) await finishLive(recording, live);
       else await runTranscription(recording);
@@ -358,6 +417,7 @@ export const Recorder = ({
   }, [finishLive, recorder, runTranscription, speech]);
 
   const handleDiscard = useCallback(async () => {
+    setConfirmDiscard(false);
     speech.stop();
     const live = liveRef.current;
     liveRef.current = null;
@@ -370,7 +430,56 @@ export const Recorder = ({
     setPipelineError('');
     setLiveStalled(false);
     setProgress({ done: 0, total: 0 });
-  }, [recorder, speech, writeTranscript]);
+    // Gone from the screen, but not yet from the device: a discard can be a
+    // mistake, and this is the only copy of the lecture.
+    const keep = keepRef.current;
+    keepRef.current = null;
+    if (keep) {
+      keep.update({ discarded: true });
+      await keep.close();
+      refreshStored();
+      toast('Recording discarded', {
+        description: 'A copy stays under "Kept on this device" in case you need it.',
+      });
+    }
+  }, [recorder, refreshStored, speech, writeTranscript]);
+
+  /** Clear the transcript, with a way back for a few seconds. */
+  const handleClear = useCallback(() => {
+    const previous = transcriptRef.current;
+    writeTranscript('');
+    toast('Transcript cleared', {
+      duration: 10000,
+      action: {
+        label: 'Undo',
+        onClick: () => writeTranscript([previous, transcriptRef.current].filter(Boolean).join('\n\n')),
+      },
+    });
+  }, [writeTranscript]);
+
+  /**
+   * Put a kept recording's transcript back in the editor. Added after what is
+   * there rather than over it, and skipped if it is already there.
+   */
+  const restoreText = useCallback(
+    (meta, { quiet = false } = {}) => {
+      const text = (meta.text || '').trim();
+      if (!text) return;
+      if (meta.progress?.detected) onDetectedLanguage?.(meta.progress.detected);
+      const previous = transcriptRef.current;
+      if (previous.includes(text)) {
+        if (!quiet) toast('That transcript is already in the editor.');
+        return;
+      }
+      writeTranscript([previous.trim(), text].filter(Boolean).join('\n\n'));
+      if (!quiet) {
+        toast.success('Transcript restored', {
+          action: { label: 'Undo', onClick: () => writeTranscript(previous) },
+        });
+      }
+    },
+    [onDetectedLanguage, writeTranscript],
+  );
 
 
   const saveFile = useCallback((blob, name) => {
@@ -393,14 +502,14 @@ export const Recorder = ({
    * a single WAV. A recording short enough to be one segment is already one
    * file, and is saved untouched rather than re-encoded.
    */
-  const handleDownloadAudio = useCallback(async () => {
-    const segments = pendingRecording?.segments || [];
+  const handleDownloadAudio = useCallback(async (recording) => {
+    const segments = recording?.segments || [];
     if (!segments.length || joining) return;
 
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const stamp = new Date(recording.meta?.startedAt || Date.now()).toISOString().slice(0, 19).replace(/[:T]/g, '-');
 
     if (segments.length === 1) {
-      const extension = (pendingRecording.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
+      const extension = (recording.mimeType || '').includes('mp4') ? 'm4a' : 'webm';
       saveFile(segments[0], `recording-${stamp}.${extension}`);
       return;
     }
@@ -420,7 +529,54 @@ export const Recorder = ({
     } finally {
       setJoining(null);
     }
-  }, [joining, pendingRecording, saveFile]);
+  }, [joining, saveFile]);
+
+  /** Read a kept recording's audio back off the device. */
+  const readStored = useCallback(async (meta) => {
+    setWorking(meta.id);
+    try {
+      const recording = await loadRecording(meta.id);
+      if (!recording) toast.error('The audio of that recording could not be read back.');
+      return recording;
+    } finally {
+      setWorking(null);
+    }
+  }, []);
+
+  const saveStoredAudio = useCallback(
+    async (meta) => {
+      const recording = await readStored(meta);
+      if (recording) await handleDownloadAudio(recording);
+    },
+    [handleDownloadAudio, readStored],
+  );
+
+  /**
+   * Transcribe the rest of a kept recording - after a reload, a crash or a
+   * discard - from the chunk it got to. What was already done is not sent again.
+   */
+  const continueStored = useCallback(
+    async (meta) => {
+      const loaded = await readStored(meta);
+      if (!loaded) return;
+      restoreText(meta, { quiet: true });
+      setMode('voice');
+      const keep = keepRecording({ meta: loaded.meta });
+      keep.update({ discarded: false });
+      const recording = { ...loaded, keep, progress: meta.progress || undefined };
+      setPendingRecording(recording);
+      await runTranscription(recording);
+    },
+    [readStored, restoreText, runTranscription],
+  );
+
+  const deleteStored = useCallback(
+    async (meta) => {
+      await deleteRecording(meta.id);
+      refreshStored();
+    },
+    [refreshStored],
+  );
 
   const liveText = `${speech.captions}${speech.interim}`.trim();
   const nearLimit = recorder.seconds > recorder.maxSeconds - 120;
@@ -540,14 +696,33 @@ export const Recorder = ({
                       {recorder.isPaused ? <Play size={12} /> : <Pause size={12} />}
                       {recorder.isPaused ? 'Resume' : 'Pause'}
                     </button>
-                    <button
-                      onClick={handleDiscard}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-red-500/10 text-zinc-400 hover:text-red-400 border border-white/10 transition-colors duration-200"
-                      data-testid="discard-btn"
-                    >
-                      <Trash2 size={12} />
-                      Discard
-                    </button>
+                    {confirmDiscard ? (
+                      <>
+                        <button
+                          onClick={handleDiscard}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 transition-colors duration-200"
+                          data-testid="confirm-discard-btn"
+                        >
+                          <Trash2 size={12} />
+                          Discard {formatDuration(recorder.seconds)}?
+                        </button>
+                        <button
+                          onClick={() => setConfirmDiscard(false)}
+                          className="px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-300 border border-white/10 transition-colors duration-200"
+                        >
+                          Keep recording
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDiscard(true)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-red-500/10 text-zinc-400 hover:text-red-400 border border-white/10 transition-colors duration-200"
+                        data-testid="discard-btn"
+                      >
+                        <Trash2 size={12} />
+                        Discard
+                      </button>
+                    )}
                   </div>
                 </motion.div>
               )}
@@ -654,7 +829,7 @@ export const Recorder = ({
                   Retry transcription
                 </button>
                 <button
-                  onClick={handleDownloadAudio}
+                  onClick={() => handleDownloadAudio(pendingRecording)}
                   disabled={!!joining}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-200 border border-white/10 transition-colors duration-200"
                 >
@@ -686,7 +861,7 @@ export const Recorder = ({
               <div className="flex items-center gap-4">
                 {pendingRecording?.complete && (
                   <button
-                    onClick={handleDownloadAudio}
+                    onClick={() => handleDownloadAudio(pendingRecording)}
                     disabled={!!joining}
                     className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white transition-colors duration-200"
                     data-testid="save-audio-btn"
@@ -696,7 +871,7 @@ export const Recorder = ({
                   </button>
                 )}
                 <button
-                  onClick={() => onTranscriptChange('')}
+                  onClick={handleClear}
                   className="text-xs text-zinc-400 hover:text-red-400 transition-colors duration-200"
                   data-testid="clear-transcript-btn"
                 >
@@ -741,6 +916,18 @@ export const Recorder = ({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {!recorder.isRecording && (
+        <DeviceRecordings
+          recordings={stored.filter((meta) => meta.id !== pendingRecording?.id)}
+          onRestoreText={restoreText}
+          onContinue={continueStored}
+          onSaveAudio={saveStoredAudio}
+          onDelete={deleteStored}
+          working={working}
+          disabled={busy || isSummarizing}
+        />
+      )}
     </div>
   );
 };

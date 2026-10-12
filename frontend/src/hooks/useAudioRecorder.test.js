@@ -272,3 +272,17 @@ it('hands each segment over as soon as it closes, the last one on stop', async (
   expect(handed).toHaveLength(3);
   expect(handed).toEqual(recording.segments);
 });
+
+it('passes on every slice of audio, numbered by the segment it belongs to', async () => {
+  const slices = [];
+  await render({ onData: (blob, segment) => slices.push(segment) });
+  await act(async () => {
+    await api.start();
+  });
+
+  // The fake only hands data over when stopped, as each segment closes.
+  await tickSeconds(11);
+  await act(async () => api.stop());
+
+  expect(slices).toEqual([0, 1, 2]);
+});

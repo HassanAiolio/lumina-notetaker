@@ -22,8 +22,10 @@ const MAX_SECONDS = maxRecordingSeconds();
  *
  * `onSegment(blob)` hears about each segment the moment it is banked, final
  * one included, so transcription can start on a lecture while it is going on.
+ * `onData(blob, segment)` hears every second of audio as it arrives, numbered
+ * by the segment it belongs to, so it can be kept somewhere a crash cannot reach.
  */
-export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) => {
+export const useAudioRecorder = ({ onMaxDuration, onSegment, onData, levelRef } = {}) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -38,6 +40,7 @@ export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) =>
   const timerRef = useRef(null);
   const elapsedRef = useRef(0);
   const segmentsRef = useRef([]);
+  const segmentIndexRef = useRef(0);
   const segmentStartedAtRef = useRef(0);
   const rotationRef = useRef(null);
   const stoppingRef = useRef(false);
@@ -47,6 +50,7 @@ export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) =>
   const wakeLockRef = useRef(null);
   const onMaxDurationRef = useRef(onMaxDuration);
   const onSegmentRef = useRef(onSegment);
+  const onDataRef = useRef(onData);
 
   useEffect(() => {
     onMaxDurationRef.current = onMaxDuration;
@@ -55,6 +59,10 @@ export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) =>
   useEffect(() => {
     onSegmentRef.current = onSegment;
   }, [onSegment]);
+
+  useEffect(() => {
+    onDataRef.current = onData;
+  }, [onData]);
 
   /** Keep a finished segment and pass it on. */
   const bank = useCallback((blob) => {
@@ -71,10 +79,14 @@ export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) =>
   /** Open a MediaRecorder for one segment, collecting its data as it arrives. */
   const openSegment = useCallback((stream) => {
     const parts = [];
+    const segment = segmentIndexRef.current;
     const mimeType = pickRecorderMimeType();
     const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
     recorder.ondataavailable = (event) => {
-      if (event.data?.size > 0) parts.push(event.data);
+      if (event.data?.size > 0) {
+        parts.push(event.data);
+        onDataRef.current?.(event.data, segment);
+      }
     };
     recorder.onerror = () => setError('Recording stopped unexpectedly.');
     // A timeslice means a crash or a closed tab still leaves usable audio.
@@ -117,6 +129,7 @@ export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) =>
 
     // stop() or cancel() may have run while the old recorder was closing.
     if (stoppingRef.current || !streamRef.current) return;
+    segmentIndexRef.current += 1;
     try {
       const next = openSegment(streamRef.current);
       if (pausedRef.current) next.recorder.pause();
@@ -231,6 +244,7 @@ export const useAudioRecorder = ({ onMaxDuration, onSegment, levelRef } = {}) =>
 
     setError('');
     segmentsRef.current = [];
+    segmentIndexRef.current = 0;
     segmentStartedAtRef.current = 0;
     elapsedRef.current = 0;
     stoppingRef.current = false;

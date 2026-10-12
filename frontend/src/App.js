@@ -209,11 +209,17 @@ function Workspace() {
     setActiveTab('history');
   }, []);
 
+  // The transcript goes with the note only once the note is safely saved; a
+  // note whose save failed would otherwise take its only source with it.
   const handleCloseOutput = useCallback(() => {
     setCurrentNote(null);
     setSavedCurrent(false);
-    setTranscript('');
-  }, [setTranscript]);
+    if (savedCurrent) {
+      setTranscript('');
+    } else if (transcript.trim()) {
+      toast('The note was not saved, so its transcript is kept below.');
+    }
+  }, [savedCurrent, setTranscript, transcript]);
 
   const tabs = [
     { id: 'record', label: 'Record', icon: Volume2 },
