@@ -247,3 +247,11 @@ export const updateNote = async (id, changes) => (await client.patch(`/notes/${i
 export const deleteNote = async (id) => (await client.delete(`/notes/${id}`)).data;
 
 export const getAllTags = async () => (await client.get('/tags')).data;
+
+// Personal API tokens, for the MCP server. Made and revoked here, from a signed-in
+// session; the token itself is only ever returned by createApiToken.
+export const listApiTokens = async () => (await client.get('/tokens')).data;
+
+export const createApiToken = async (name) => (await client.post('/tokens', { name })).data;
+
+export const revokeApiToken = async (id) => (await client.delete(`/tokens/${encodeURIComponent(id)}`)).data;

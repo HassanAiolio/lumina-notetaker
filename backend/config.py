@@ -123,6 +123,9 @@ class Settings:
     # Per-user sliding-window rate limits: (requests, window_seconds)
     RATE_LIMIT_AI: tuple[int, int] = (_int("RATE_LIMIT_AI_REQUESTS", 30), _int("RATE_LIMIT_AI_WINDOW", 60))
     RATE_LIMIT_WRITE: tuple[int, int] = (_int("RATE_LIMIT_WRITE_REQUESTS", 120), _int("RATE_LIMIT_WRITE_WINDOW", 60))
+    # Per personal API token, across everything it reads.
+    RATE_LIMIT_TOKEN: tuple[int, int] = (_int("RATE_LIMIT_TOKEN_REQUESTS", 120), _int("RATE_LIMIT_TOKEN_WINDOW", 60))
+    MAX_API_TOKENS: int = _int("MAX_API_TOKENS", 10)
 
     APP_VERSION: str = os.environ.get("APP_VERSION", "2.0.0")
 

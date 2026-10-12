@@ -39,7 +39,12 @@ signed-in user and are never visible to anyone else.
   that still produces usable notes when the AI is down, retryable transcription, a downloadable
   copy of the audio, and a draft transcript that survives a page reload.
 - **Full transcript kept** — stored alongside every note, searchable and exportable.
-- **Search, tag filtering, pagination, Markdown export**
+- **Search, tag filtering, pagination**
+- **Obsidian export** — one note, or the whole library as a zip: properties, real `#tags`,
+  the cited slide pages as attachments, the transcript in a folded callout, and the revision
+  deck as cards for the Spaced Repetition plugin. Still plain Markdown, so any editor reads it.
+- **Claude can read your notes** — a small MCP server searches and reads them with a personal
+  token that can only read. See [Connect Claude](#6-connect-claude-mcp).
 - **3D interactive scene** — a floating notebook, a cursor-tracking pen and a paper airplane on
   note generation. Purely decorative: it is behind an error boundary and the app works without it.
 
@@ -207,6 +212,7 @@ python -m pytest
 
 cd ../frontend && CI=true npm test
 cd ../worker && npm test
+cd ../mcp-server && python -m pytest   # needs httpx and pytest-asyncio, from the backend's dev requirements
 ```
 
 ### 5. Transcription Worker (Cloudflare)
@@ -245,6 +251,67 @@ live: `curl https://lumina-transcribe.<you>.workers.dev/health`. To watch reques
 
 For local work, put the same three secrets in `worker/.dev.vars` (git-ignored) and run
 `npm run dev`.
+
+### 6. Connect Claude (MCP)
+
+`mcp-server/` lets Claude Desktop or Claude Code search and read your notes. It runs on your
+computer and talks to the backend with a personal API token. Tokens can only read: the
+backend refuses them on every route that creates, changes or deletes anything, and on the
+token routes themselves, so a token cannot make more tokens.
+
+1. In the app, open the account menu → **API tokens** → **Create**. Copy the token (it is
+   shown once) and the API URL under it.
+2. Install the server's two dependencies in their own environment:
+
+   ```bash
+   python -m venv mcp-server/.venv
+   mcp-server/.venv/Scripts/python -m pip install -r mcp-server/requirements.txt   # macOS/Linux: .venv/bin/python
+   ```
+
+   With [uv](https://docs.astral.sh/uv/) you can skip this: `uv run mcp-server/lumina_mcp.py`
+   installs them from the script's header.
+3. Add it to Claude, using absolute paths.
+
+   **Claude Code**
+
+   ```bash
+   claude mcp add --transport stdio --scope user lumina \
+     --env LUMINA_API_URL=https://your-backend.onrender.com \
+     --env LUMINA_TOKEN=lum_... \
+     -- /full/path/to/ainote/mcp-server/.venv/Scripts/python /full/path/to/ainote/mcp-server/lumina_mcp.py
+   ```
+
+   **Claude Desktop**: add this to `claude_desktop_config.json` (Settings → Developer → Edit
+   Config), then restart Claude Desktop.
+
+   ```json
+   {
+     "mcpServers": {
+       "lumina": {
+         "command": "C:\\full\\path\\to\\ainote\\mcp-server\\.venv\\Scripts\\python.exe",
+         "args": ["C:\\full\\path\\to\\ainote\\mcp-server\\lumina_mcp.py"],
+         "env": {
+           "LUMINA_API_URL": "https://your-backend.onrender.com",
+           "LUMINA_TOKEN": "lum_..."
+         }
+       }
+     }
+   }
+   ```
+
+Then ask things like *"find my thermodynamics lectures from this month"* or *"quiz me on the
+last lecture"*. The tools:
+
+| Tool | What it returns |
+|---|---|
+| `search_notes(query, tag, note_type, limit)` | matching notes, newest first, with ids and a one-line preview |
+| `get_note(note_id, include_transcript)` | the whole note as Markdown; the transcript only when asked, since it can run to 100k characters |
+| `list_tags()` | every tag in use |
+| `get_flashcards(note_id)` | the question and answer cards the app's revision deck uses |
+
+On the free Render plan the backend sleeps when idle, so the first call after a quiet spell
+can take up to a minute. The server waits 90 seconds, then says the backend is waking up.
+Revoke a token from the same menu if it leaks; it stops working at once.
 
 ---
 
@@ -293,7 +360,7 @@ backend/
 ├── server.py          # app wiring, routes, middleware
 ├── config.py          # environment settings
 ├── db.py              # Mongo client, indexes, legacy migration
-├── auth.py            # Google token verification, app JWTs
+├── auth.py            # Google token verification, app JWTs, read-only API tokens
 ├── gemini.py          # retries, model fallback, JSON recovery
 ├── transcription.py   # audio validation, chunking, speech-to-text
 ├── summarizer.py      # prompting, normalization, offline fallback
@@ -310,9 +377,17 @@ frontend/src/
 │   └── useSpeechRecognition.js  # live captions (best-effort)
 ├── lib/
 │   ├── audio.js                 # decode, resample, WAV, chunking
-│   └── notes.js                 # section shapes, labels, Markdown
+│   ├── notes.js                 # section shapes, labels, Markdown
+│   ├── obsidian.js              # notes as Obsidian Markdown, file names, tags
+│   ├── obsidianExport.js        # one note or the library, with slide pages
+│   └── zip.js                   # a stored (uncompressed) zip writer
 ├── services/api.js              # axios instance, auth, retries
 └── components/                  # Recorder, NoteOutput, NoteHistory, SignIn…
+
+mcp-server/
+├── lumina_mcp.py      # the MCP server: tools over stdio
+├── lumina_api.py      # API client and notes as text, testable without the MCP SDK
+└── test_lumina_api.py
 ```
 
 ---

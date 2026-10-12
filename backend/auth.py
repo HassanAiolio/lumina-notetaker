@@ -1,5 +1,7 @@
-"""Google Sign-In verification and app session tokens."""
+"""Google Sign-In verification, app session tokens and personal API tokens."""
+import hashlib
 import logging
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +12,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 
+import db
+import ratelimit
 from config import settings
 from db import get_db
 
@@ -137,19 +141,79 @@ def issue_access_token(user: User) -> tuple[str, int]:
     return token, int(ttl.total_seconds())
 
 
-async def current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-) -> User:
-    """FastAPI dependency: the signed-in user, or 401."""
+def _bearer(credentials: HTTPAuthorizationCredentials | None) -> str:
     if credentials is None or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not signed in",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    return credentials.credentials
+
+
+async def current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> User:
+    """FastAPI dependency: the signed-in user, or 401.
+
+    Only a session from signing in will do. Personal API tokens are refused
+    here, so everything that changes data stays out of their reach.
+    """
+    token = _bearer(credentials)
+    if token.startswith(API_TOKEN_PREFIX):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API tokens are read-only. Sign in to the app to do that.",
+        )
+    return _session_user(token)
+
+
+async def reading_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> User:
+    """FastAPI dependency for read-only routes: a session or a personal API token."""
+    token = _bearer(credentials)
+    if token.startswith(API_TOKEN_PREFIX):
+        return await _api_token_user(token)
+    return _session_user(token)
+
+
+# ── Personal API tokens ──────────────────────────────────────────────────────
+# For tools outside the browser, such as the MCP server, which cannot sign in
+# with Google. Only a SHA-256 of each token is stored: the token itself is
+# shown once, when it is made. They read notes and never write them.
+
+API_TOKEN_PREFIX = "lum_"
+
+
+def hash_api_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def new_api_token() -> str:
+    return API_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+async def _api_token_user(token: str) -> User:
+    tokens = db.get_db().api_tokens
+    doc = await tokens.find_one({"hash": hash_api_token(token)}, {"_id": 0})
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unknown or revoked API token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    ratelimit.check(f"token:{doc['id']}", *settings.RATE_LIMIT_TOKEN)
+    await tokens.update_one(
+        {"id": doc["id"]}, {"$set": {"last_used_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    return User(id=doc["user_id"], email=doc.get("email", ""), name=doc.get("user_name", ""))
+
+
+def _session_user(token: str) -> User:
     try:
         payload = jwt.decode(
-            credentials.credentials,
+            token,
             settings.JWT_SECRET,
             algorithms=[settings.JWT_ALGORITHM],
         )

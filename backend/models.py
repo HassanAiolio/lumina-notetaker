@@ -200,3 +200,31 @@ class NotesPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ApiTokenCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Give the token a name")
+        return value
+
+
+class ApiTokenOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str
+    # The start of the token, so a list of them can be told apart.
+    prefix: str
+    created_at: str
+    last_used_at: str | None = None
+
+
+class ApiTokenCreated(ApiTokenOut):
+    # Returned once, at creation. Only its hash is kept.
+    token: str

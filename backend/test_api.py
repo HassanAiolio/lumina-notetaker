@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import db as db_module  # noqa: E402
 import ratelimit  # noqa: E402
 import server  # noqa: E402
-from auth import User, current_user  # noqa: E402
+from auth import User, current_user, hash_api_token, reading_user  # noqa: E402
 
 
 # ── A very small async Mongo stand-in ─────────────────────────────────────────
@@ -155,6 +155,7 @@ class FakeDatabase:
         self.notes = FakeCollection()
         self.users = FakeCollection()
         self.slide_pages = FakeCollection()
+        self.api_tokens = FakeCollection()
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -174,7 +175,7 @@ def fake_db(monkeypatch):
 
 @pytest.fixture
 def client(fake_db):
-    server.app.dependency_overrides[current_user] = lambda: ALICE
+    as_user(ALICE)
     with TestClient(server.app) as test_client:
         yield test_client
     server.app.dependency_overrides.clear()
@@ -182,6 +183,19 @@ def client(fake_db):
 
 def as_user(user):
     server.app.dependency_overrides[current_user] = lambda: user
+    server.app.dependency_overrides[reading_user] = lambda: user
+
+
+def with_token(token):
+    """From here on, requests are checked for real, carrying this token."""
+    server.app.dependency_overrides.clear()
+    return {"Authorization": f"Bearer {token}"}
+
+
+def make_token(client, name="Claude"):
+    response = client.post("/api/tokens", json={"name": name})
+    assert response.status_code == 201, response.text
+    return response.json()
 
 
 def make_note(client, **overrides):
@@ -452,3 +466,84 @@ def test_regenerated_notes_rewrite_the_same_note(client):
     assert updated["raw_transcript"] == "Texte revu"
     assert updated["slides"]["cited"] == [2]
     assert client.get("/api/notes").json()["total"] == 1
+
+
+# ── Personal API tokens ───────────────────────────────────────────────────────
+
+def test_an_api_token_is_shown_once_and_kept_only_as_a_hash(client, fake_db):
+    created = make_token(client)
+    assert created["token"].startswith("lum_")
+    assert created["prefix"] == created["token"][:10]
+
+    stored = fake_db.api_tokens.docs[0]
+    assert stored["hash"] == hash_api_token(created["token"])
+    assert created["token"] not in stored.values()
+
+    listed = client.get("/api/tokens").json()
+    assert [entry["id"] for entry in listed] == [created["id"]]
+    assert "token" not in listed[0] and "hash" not in listed[0]
+
+
+def test_an_api_token_reads_its_owners_notes_and_nothing_else(client, fake_db):
+    mine = make_note(client, title="Mine")
+    as_user(BOB)
+    theirs = make_note(client, title="Theirs", tags=["private"])
+    as_user(ALICE)
+    token = make_token(client)["token"]
+
+    headers = with_token(token)
+    listing = client.get("/api/notes", headers=headers)
+    assert listing.status_code == 200
+    assert [note["title"] for note in listing.json()["items"]] == ["Mine"]
+    assert client.get(f"/api/notes/{mine['id']}", headers=headers).status_code == 200
+    assert client.get(f"/api/notes/{theirs['id']}", headers=headers).status_code == 404
+    assert client.get("/api/tags", headers=headers).json() == ["work"]
+    assert fake_db.api_tokens.docs[0]["last_used_at"]
+
+
+def test_an_api_token_cannot_change_anything(client):
+    note = make_note(client)
+    token = make_token(client)
+    headers = with_token(token["token"])
+
+    for method, path, body in [
+        ("post", "/api/notes", {"title": "x"}),
+        ("patch", f"/api/notes/{note['id']}", {"title": "x"}),
+        ("delete", f"/api/notes/{note['id']}", None),
+        ("post", "/api/notes/summarize", {"transcript": "hello"}),
+        ("post", "/api/tokens", {"name": "another"}),
+        ("get", "/api/tokens", None),
+        ("delete", f"/api/tokens/{token['id']}", None),
+        ("get", "/api/auth/me", None),
+    ]:
+        kwargs = {"headers": headers, **({"json": body} if body is not None else {})}
+        response = client.request(method.upper(), path, **kwargs)
+        assert response.status_code == 403, (method, path, response.text)
+        assert "read-only" in response.json()["detail"]
+
+
+def test_a_revoked_or_unknown_token_is_refused(client):
+    token = make_token(client)
+    assert client.delete(f"/api/tokens/{token['id']}").status_code == 200
+    assert client.get("/api/tokens").json() == []
+
+    headers = with_token(token["token"])
+    assert client.get("/api/notes", headers=headers).status_code == 401
+    assert client.get("/api/notes", headers={"Authorization": "Bearer lum_nonsense"}).status_code == 401
+
+
+def test_tokens_are_private_to_their_owner(client):
+    token = make_token(client)
+    as_user(BOB)
+    assert client.get("/api/tokens").json() == []
+    assert client.delete(f"/api/tokens/{token['id']}").status_code == 404
+
+
+def test_tokens_need_a_name_and_are_capped(client, monkeypatch):
+    assert client.post("/api/tokens", json={"name": "   "}).status_code == 422
+    monkeypatch.setattr(server.settings, "MAX_API_TOKENS", 2)
+    make_token(client, "one")
+    make_token(client, "two")
+    response = client.post("/api/tokens", json={"name": "three"})
+    assert response.status_code == 400
+    assert "Revoke one" in response.json()["detail"]

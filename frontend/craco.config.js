@@ -56,6 +56,8 @@ let webpackConfig = {
         '^@breezystack/lamejs$': '<rootDir>/node_modules/@breezystack/lamejs/dist/lamejs.js',
         // axios hands jsdom its ES module build, which Jest cannot load as is.
         '^axios$': '<rootDir>/node_modules/axios/dist/node/axios.cjs',
+        // The same @ alias webpack has, which the ui/ components import through.
+        '^@/(.*)$': '<rootDir>/src/$1',
       },
     }),
   },

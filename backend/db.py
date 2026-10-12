@@ -56,6 +56,8 @@ async def ensure_indexes() -> None:
         await db.slide_pages.create_index([("note_id", 1), ("page", 1)], name="note_page", unique=True)
         await db.users.create_index([("id", 1)], name="user_id_unique", unique=True)
         await db.users.create_index([("email", 1)], name="user_email_unique", unique=True)
+        await db.api_tokens.create_index([("hash", 1)], name="token_hash", unique=True)
+        await db.api_tokens.create_index([("user_id", 1), ("created_at", -1)], name="user_tokens")
         logger.info("MongoDB indexes ensured")
     except Exception as exc:  # noqa: BLE001 - a missing index must not block boot
         logger.error("Could not ensure indexes: %s", exc)

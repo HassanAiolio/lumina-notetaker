@@ -1,8 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { LogOut, User as UserIcon } from 'lucide-react';
+import { KeyRound, LogOut, User as UserIcon } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { listRecordings } from '../lib/recordingStore';
+
+// Loaded when first opened: few people open it, and it brings the dialog library.
+const ApiTokens = lazy(() => import('./ApiTokens').then((module) => ({ default: module.ApiTokens })));
 
 /** What signing out would delete from this device: the draft, and kept recordings. */
 const localWork = async (owner) => {
@@ -30,6 +33,7 @@ export const UserMenu = () => {
   const [imageFailed, setImageFailed] = useState(false);
   // Set when signing out would delete something, until confirmed or cancelled.
   const [atRisk, setAtRisk] = useState(null);
+  const [tokensOpen, setTokensOpen] = useState(false);
   const containerRef = useRef(null);
 
   useEffect(() => {
@@ -119,27 +123,47 @@ export const UserMenu = () => {
                 </div>
               </div>
             ) : (
-              <button
-                onClick={async () => {
-                  const work = await localWork(user.id);
-                  if (work) {
-                    setAtRisk(work);
-                    return;
-                  }
-                  setOpen(false);
-                  signOut();
-                }}
-                className="w-full flex items-center gap-2 px-3 py-2 mt-1 rounded-lg text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors duration-150"
-                role="menuitem"
-                data-testid="sign-out-btn"
-              >
-                <LogOut size={14} />
-                Sign out
-              </button>
+              <>
+                <button
+                  onClick={() => {
+                    setOpen(false);
+                    setTokensOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 mt-1 rounded-lg text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors duration-150"
+                  role="menuitem"
+                  data-testid="api-tokens-btn"
+                >
+                  <KeyRound size={14} />
+                  API tokens
+                </button>
+                <button
+                  onClick={async () => {
+                    const work = await localWork(user.id);
+                    if (work) {
+                      setAtRisk(work);
+                      return;
+                    }
+                    setOpen(false);
+                    signOut();
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-zinc-300 hover:bg-white/5 hover:text-white transition-colors duration-150"
+                  role="menuitem"
+                  data-testid="sign-out-btn"
+                >
+                  <LogOut size={14} />
+                  Sign out
+                </button>
+              </>
             )}
           </motion.div>
         )}
       </AnimatePresence>
+
+      {tokensOpen && (
+        <Suspense fallback={null}>
+          <ApiTokens open onOpenChange={setTokensOpen} />
+        </Suspense>
+      )}
     </div>
   );
 };

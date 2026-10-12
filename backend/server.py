@@ -26,9 +26,21 @@ import languages  # noqa: E402
 import ratelimit  # noqa: E402
 import summarizer  # noqa: E402
 import transcription  # noqa: E402
-from auth import User, current_user, issue_access_token, upsert_user, verify_google_credential  # noqa: E402
+from auth import (  # noqa: E402
+    User,
+    current_user,
+    hash_api_token,
+    issue_access_token,
+    new_api_token,
+    reading_user,
+    upsert_user,
+    verify_google_credential,
+)
 from config import settings  # noqa: E402
 from models import (  # noqa: E402
+    ApiTokenCreate,
+    ApiTokenCreated,
+    ApiTokenOut,
     AuthResponse,
     GoogleAuthRequest,
     NoteCreate,
@@ -173,6 +185,53 @@ async def whoami(user: User = Depends(current_user)):
     return UserOut(**user.public())
 
 
+# ── Personal API tokens ───────────────────────────────────────────────────────
+# Made, listed and revoked from a signed-in session only: a token cannot mint
+# more tokens or keep itself alive.
+
+@api.post("/tokens", response_model=ApiTokenCreated, status_code=status.HTTP_201_CREATED)
+async def create_api_token(req: ApiTokenCreate, user: User = Depends(current_user)):
+    ratelimit.check(f"write:{user.id}", *settings.RATE_LIMIT_WRITE)
+    tokens = db.get_db().api_tokens
+    if await tokens.count_documents({"user_id": user.id}) >= settings.MAX_API_TOKENS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"You already have {settings.MAX_API_TOKENS} tokens. Revoke one you no longer use first.",
+        )
+    token = new_api_token()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user.id,
+        "email": user.email,
+        "user_name": user.name,
+        "name": req.name,
+        "prefix": token[:10],
+        "hash": hash_api_token(token),
+        "created_at": _now(),
+        "last_used_at": None,
+    }
+    await tokens.insert_one(dict(doc))
+    return ApiTokenCreated(**doc, token=token)
+
+
+@api.get("/tokens", response_model=list[ApiTokenOut])
+async def list_api_tokens(user: User = Depends(current_user)):
+    cursor = (
+        db.get_db().api_tokens.find({"user_id": user.id}, {"_id": 0, "hash": 0})
+        .sort("created_at", -1)
+    )
+    return [ApiTokenOut(**doc) async for doc in cursor]
+
+
+@api.delete("/tokens/{token_id}", status_code=status.HTTP_200_OK)
+async def revoke_api_token(token_id: str, user: User = Depends(current_user)):
+    ratelimit.check(f"write:{user.id}", *settings.RATE_LIMIT_WRITE)
+    result = await db.get_db().api_tokens.delete_one({"id": token_id, "user_id": user.id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
+    return {"message": "Token revoked", "id": token_id}
+
+
 # ── Transcription ─────────────────────────────────────────────────────────────
 
 @api.post("/transcribe", response_model=TranscribeResponse)
@@ -259,7 +318,7 @@ async def list_notes(
     brief: bool = Query(False),
     limit: int = Query(30, ge=1, le=settings.MAX_NOTES_PAGE),
     offset: int = Query(0, ge=0),
-    user: User = Depends(current_user),
+    user: User = Depends(reading_user),
 ):
     """A page of the user's notes, newest first.
 
@@ -295,7 +354,7 @@ async def list_notes(
 
 
 @api.get("/notes/{note_id}", response_model=NoteResponse)
-async def get_note(note_id: str, user: User = Depends(current_user)):
+async def get_note(note_id: str, user: User = Depends(reading_user)):
     note = await db.get_db().notes.find_one({"id": note_id, "user_id": user.id}, {"_id": 0})
     if not note:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note not found")
@@ -377,7 +436,7 @@ async def put_slide_page(
 
 
 @api.get("/notes/{note_id}/slides/{page}")
-async def get_slide_page(note_id: str, page: int = PathParam(ge=1, le=2000), user: User = Depends(current_user)):
+async def get_slide_page(note_id: str, page: int = PathParam(ge=1, le=2000), user: User = Depends(reading_user)):
     doc = await db.get_db().slide_pages.find_one({"note_id": note_id, "page": page, "user_id": user.id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="That slide page was not kept")
@@ -387,7 +446,7 @@ async def get_slide_page(note_id: str, page: int = PathParam(ge=1, le=2000), use
 
 
 @api.get("/tags", response_model=list[str])
-async def list_tags(user: User = Depends(current_user)):
+async def list_tags(user: User = Depends(reading_user)):
     pipeline = [
         {"$match": {"user_id": user.id}},
         {"$unwind": "$tags"},
