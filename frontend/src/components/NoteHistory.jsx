@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
-  ChevronRight, GraduationCap, Loader2, RotateCcw, Search, Tag, TriangleAlert, X,
+  ChevronRight, Download, GraduationCap, Loader2, RotateCcw, Search, Tag, TriangleAlert, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Input } from './ui/input';
 import { NoteReader } from './NoteReader';
 import { errorMessage, getAllTags, getNote, getNotes } from '../services/api';
 import { groupByDate, languageName, noteCounts, notePreview, TYPE_LABELS } from '../lib/notes';
+import { exportLibrary } from '../lib/obsidianExport';
 
 const PAGE_SIZE = 30;
 
@@ -82,6 +83,8 @@ export const NoteHistory = ({ refreshTrigger, deck = null }) => {
   const [openId, setOpenId] = useState(hashNote);
   // A note opened from a link may not be in the page that is loaded.
   const [stray, setStray] = useState(null);
+  // Packing the library for Obsidian: {done, total} while it runs.
+  const [exporting, setExporting] = useState(null);
 
   const requestIdRef = useRef(0);
   const searchRef = useRef(null);
@@ -217,6 +220,23 @@ export const NoteHistory = ({ refreshTrigger, deck = null }) => {
 
   const groups = useMemo(() => groupByDate(notes), [notes]);
   const hasFilters = Boolean(debouncedSearch || selectedTag || selectedType);
+
+  /** What the list shows - all of it, not just the loaded page - as one zip. */
+  const exportShown = async () => {
+    if (exporting) return;
+    setExporting({ done: 0, total });
+    try {
+      const count = await exportLibrary(
+        { search: debouncedSearch || undefined, tag: selectedTag || undefined, type: selectedType || undefined },
+        (done, all) => setExporting({ done, total: all }),
+      );
+      toast.success(`Exported ${count} note${count === 1 ? '' : 's'}. Unzip the folder into your Obsidian vault.`);
+    } catch (err) {
+      toast.error(errorMessage(err, 'Could not export your notes.'));
+    } finally {
+      setExporting(null);
+    }
+  };
 
   if (openId) {
     if (!openNote) {
@@ -358,10 +378,24 @@ export const NoteHistory = ({ refreshTrigger, deck = null }) => {
         </div>
       ) : (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-          <p className="text-xs text-zinc-400">
-            {total} note{total === 1 ? '' : 's'}
-            {hasFilters ? ' found' : ''}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-zinc-400">
+              {total} note{total === 1 ? '' : 's'}
+              {hasFilters ? ' found' : ''}
+            </p>
+            <button
+              onClick={exportShown}
+              disabled={!!exporting}
+              title="A zip of Markdown notes with properties, tags and their slide pages"
+              className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white transition-colors duration-200 disabled:opacity-60"
+              data-testid="export-all-btn"
+            >
+              {exporting ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+              {exporting
+                ? `Exporting ${exporting.done}/${exporting.total}…`
+                : `Export ${hasFilters ? 'these' : 'all'} for Obsidian`}
+            </button>
+          </div>
           {groups.map((group) => (
             <section key={group.label} className="space-y-2.5">
               <h3 className="text-[11px] uppercase tracking-widest text-zinc-500 font-medium first-letter:uppercase">

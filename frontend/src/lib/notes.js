@@ -82,20 +82,11 @@ export const noteToMarkdown = (note) => {
     .concat('\n');
 };
 
-export const downloadMarkdown = (note) => {
-  const markdown = noteToMarkdown(note);
-  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+export const downloadBlob = (blob, name) => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  const slug =
-    (note.title || 'note')
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}]+/gu, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60) || 'note';
-
   link.href = url;
-  link.download = `${slug}.md`;
+  link.download = name;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
