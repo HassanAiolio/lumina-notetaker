@@ -66,7 +66,6 @@ export const Recorder = ({
   onRecordingChange,
   onTranscribingChange,
   onDetectedLanguage,
-  onTranscribed,
   onSessionChange,
   deck,
   onDeck,
@@ -164,7 +163,11 @@ export const Recorder = ({
     [languages],
   );
 
-  /** A recording is fully transcribed: keep its audio, report, hand over. */
+  /**
+   * A recording is fully transcribed: keep its audio and report. Notes are not
+   * made from it until the user asks, so there is time to add slides or fix
+   * the transcript first.
+   */
   const finishRecording = useCallback(
     (recording, progress) => {
       // context only ever holds text a chunk returned, so empty means silence.
@@ -181,10 +184,10 @@ export const Recorder = ({
         progress.detected
           ? `Transcribed (${languageName(progress.detected) || progress.detected})`
           : 'Transcribed',
+        { description: 'Review it, add slides if you have them, then Generate notes.' },
       );
-      onTranscribed?.({ transcript: transcriptRef.current, language: progress.detected });
     },
-    [onDetectedLanguage, onTranscribed],
+    [onDetectedLanguage],
   );
 
   /**

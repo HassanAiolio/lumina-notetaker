@@ -148,12 +148,10 @@ function Workspace() {
     [deck, keepSlides],
   );
 
-  // `override` carries a transcript that has only just been written: a
-  // recording that finished transcribing goes straight on to notes, before
-  // the state holding it has re-rendered.
-  const handleSummarize = useCallback(async (override) => {
-    const text = (override?.transcript ?? transcript).trim();
-    const heard = override?.language || detectedLanguage;
+  // Only ever started by the user: a finished transcription waits here so
+  // slides can be added and mistakes fixed before notes are made from it.
+  const handleSummarize = useCallback(async () => {
+    const text = transcript.trim();
     if (!text) {
       toast.error('There is nothing to summarize yet.');
       return;
@@ -162,7 +160,7 @@ function Workspace() {
     setIsSummarizing(true);
     setSavedCurrent(false);
     try {
-      const summaryLanguage = language === 'auto' ? heard || 'auto' : language;
+      const summaryLanguage = language === 'auto' ? detectedLanguage || 'auto' : language;
       const slidesText = deck ? deck.pages.filter((page) => page.text) : [];
       const result = await summarizeTranscript(text, summaryLanguage, slidesText);
       const note = {
@@ -171,7 +169,7 @@ function Workspace() {
         tags: currentNote?.tags || [],
         title: result.title,
         type: result.type || '',
-        language: result.language || heard || language,
+        language: result.language || detectedLanguage || language,
         sections: result.sections || {},
         labels: result.labels || {},
         raw_transcript: text,
@@ -346,8 +344,7 @@ function Workspace() {
                       onLanguageChange={setLanguage}
                       languages={languages}
                       isSummarizing={isSummarizing}
-                      onSummarize={() => handleSummarize()}
-                      onTranscribed={handleSummarize}
+                      onSummarize={handleSummarize}
                       onSessionChange={setSessionActive}
                       deck={deck}
                       onDeck={setDeck}
