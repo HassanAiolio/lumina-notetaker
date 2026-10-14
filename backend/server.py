@@ -27,6 +27,7 @@ import languages  # noqa: E402
 import ratelimit  # noqa: E402
 import summarizer  # noqa: E402
 import transcription  # noqa: E402
+from window_cache import WindowCache  # noqa: E402
 from auth import (  # noqa: E402
     User,
     current_user,
@@ -285,7 +286,7 @@ async def summarize_transcript(req: SummarizeRequest, user: User = Depends(curre
     ratelimit.check(f"ai:{user.id}", *settings.RATE_LIMIT_AI)
 
     slides = [page.model_dump() for page in req.slides]
-    result = await summarizer.summarize(req.transcript, req.language, slides=slides)
+    result = await summarizer.summarize(req.transcript, req.language, slides=slides, cache=WindowCache(user.id))
     if result.get("degraded"):
         logger.warning(
             "Returned degraded notes to %s (%s)", user.email, result.get("degraded_reason")
@@ -310,7 +311,9 @@ async def start_summary_job(req: SummarizeRequest, user: User = Depends(current_
     slides = [page.model_dump() for page in req.slides]
 
     async def work(report) -> dict:
-        result = await summarizer.summarize(req.transcript, req.language, slides=slides, report=report)
+        result = await summarizer.summarize(
+            req.transcript, req.language, slides=slides, report=report, cache=WindowCache(user.id)
+        )
         if result.get("degraded"):
             logger.warning(
                 "Returned degraded notes to %s (%s)", user.email, result.get("degraded_reason")

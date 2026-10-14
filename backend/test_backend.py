@@ -28,6 +28,7 @@ import languages  # noqa: E402
 import ratelimit  # noqa: E402
 import retranscribe  # noqa: E402
 import summarizer  # noqa: E402
+import window_cache  # noqa: E402
 import loops  # noqa: E402
 import transcription  # noqa: E402
 from models import NoteCreate, NoteUpdate, SummarizeRequest  # noqa: E402
@@ -1159,3 +1160,110 @@ def test_the_backup_key_alone_still_counts_as_configured(monkeypatch):
     monkeypatch.setattr(groq.settings, "GROQ_API_KEY_BACKUP", "backup")
     assert groq.settings.groq_configured
     assert groq.settings.groq_keys == ["backup"]
+
+
+# -- a rerun after an incomplete one -------------------------------------------------
+
+class MemoryCache:
+    key = staticmethod(window_cache.window_key)
+
+    def __init__(self):
+        self.store = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def put(self, key, part):
+        self.store[key] = part
+
+    async def forget(self, keys):
+        for key in keys:
+            self.store.pop(key, None)
+
+
+async def test_a_rerun_only_asks_for_the_windows_that_were_missing(monkeypatch):
+    calls = {"windows": 0}
+    broken = {"on": True}
+
+    async def gemini_answer(parts, **_k):
+        prompt = parts[0]["text"]
+        if _is_synthesis(prompt):
+            return _lecture_json({"overview": ["Tout le cours"]})
+        calls["windows"] += 1
+        if broken["on"] and "numero 700." in prompt:
+            raise gemini.GeminiError("server error", status_code=500)
+        first_sentence = min(int(n) for n in re.findall(r"numero (\d+)\.", prompt.split("Transcript")[-1]))
+        return _lecture_json({"definitions": [f"**T{first_sentence}** : d"]})
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+    monkeypatch.setattr(summarizer.settings, "GEMINI_WINDOW_CHARS", 8_000)
+    cache = MemoryCache()
+    transcript = _long_transcript()
+    windows = len(summarizer.split_for_window(transcript, 8_000))
+
+    first = await summarizer.summarize(transcript, "fr", cache=cache)
+    assert first["degraded_reason"] == "partial"
+    assert calls["windows"] == windows
+    assert len(cache.store) == windows - 1          # what worked is kept
+
+    broken["on"] = False
+    calls["windows"] = 0
+    second = await summarizer.summarize(transcript, "fr", cache=cache)
+    assert calls["windows"] == 1                    # only the gap went to the AI
+    assert second["degraded"] is False
+    assert len(second["sections"]["definitions"]) == windows
+    assert cache.store == {}                        # complete, so nothing is kept
+
+    calls["windows"] = 0
+    await summarizer.summarize(transcript, "fr", cache=cache)
+    assert calls["windows"] == windows              # asking again writes fresh notes
+
+
+async def test_windows_groq_wrote_in_pieces_are_reused_when_gemini_is_back(monkeypatch):
+    # Gemini out, Groq writes Gemini-sized windows in Groq-sized pieces until
+    # its own limit; on the rerun those pieces are found under the bigger window.
+    gemini_up = {"on": False}
+    gemini_windows = []
+    groq_calls = {"n": 0}
+
+    async def gemini_answer(parts, **_k):
+        prompt = parts[0]["text"]
+        if not gemini_up["on"]:
+            raise gemini.GeminiError("quota", quota=True)
+        if not _is_synthesis(prompt):
+            gemini_windows.append(prompt)
+        return NOTES_JSON % "Gemini"
+
+    async def groq_answer(prompt, **_k):
+        groq_calls["n"] += 1
+        if groq_calls["n"] > 3:
+            raise groq.GroqError("rate limited", status_code=429, quota=True)
+        return NOTES_JSON % "Groq"
+
+    monkeypatch.setattr(summarizer, "generate", gemini_answer)
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "k")
+    monkeypatch.setattr(summarizer.settings, "GEMINI_WINDOW_CHARS", 16_000)
+    monkeypatch.setattr(summarizer.settings, "GROQ_WINDOW_CHARS", 8_000)
+    monkeypatch.setattr(groq, "generate", groq_answer)
+    cache = MemoryCache()
+    transcript = _long_transcript()
+    windows = summarizer.split_for_window(transcript, 16_000)
+
+    assert (await summarizer.summarize(transcript, "fr", cache=cache))["degraded"] is True
+
+    gemini_up["on"] = True
+    result = await summarizer.summarize(transcript, "fr", cache=cache)
+
+    assert result["degraded"] is False
+    # The first window was done in two pieces and is not asked for again; the
+    # second has only one piece kept, so it goes to Gemini whole, as do the rest.
+    assert len(gemini_windows) == len(windows) - 1
+    assert not any("numero 0." in prompt for prompt in gemini_windows)
+
+
+def test_a_window_is_the_same_only_with_the_same_language_and_slides():
+    key = window_cache.window_key
+    assert key("Texte.", "fr", []) == key("Texte.", "fr", [])
+    assert key("Texte.", "fr", []) != key("Texte.", "en", [])
+    assert key("Texte.", "fr", []) != key("Texte.", "fr", [{"page": 1, "text": "Diapo"}])
+    assert key("Texte.", "fr", []) != key("Texte!", "fr", [])

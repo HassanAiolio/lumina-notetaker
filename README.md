@@ -158,8 +158,10 @@ decided window by window: when Gemini runs out halfway through a lecture, Groq w
 and the parts join up in order. A provider that reports a rate limit is rested for the rest of
 the pass, and windows every provider refused get one more try after `WINDOW_RETRY_PAUSE`
 seconds (60 by default), since most limits are per minute. Only a window that fails again is
-left out, and the notes say a stretch is missing. Local extraction stays as the last resort,
-but it produces visibly worse notes and says so in the UI.
+left out, and the notes say a stretch is missing. Generating them again redoes only that
+stretch: every window written is kept (`window_notes`, cleared once a run is complete, and
+after `WINDOW_CACHE_TTL` otherwise), so the quota is not spent twice on the rest. Local
+extraction stays as the last resort, but it produces visibly worse notes and says so in the UI.
 
 `GROQ_API_KEY_BACKUP` is used when `GROQ_API_KEY` is rate limited. Groq counts limits per
 account, so it only helps if it comes from a different Groq account.

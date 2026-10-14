@@ -119,7 +119,7 @@ export const NoteOutput = ({ note, onSave, onClose, onOpenSaved, isSaving, saved
           <TriangleAlert size={14} className="flex-shrink-0 mt-px" />
           <span className="leading-relaxed">
             {note.degraded_reason === 'partial'
-              ? 'Part of the recording could not be summarized before the AI hit its limit, so a stretch of it is missing from these notes. Your transcript is intact — regenerate later for the full set.'
+              ? 'Part of the recording could not be summarized before the AI hit its limit, so a stretch of it is missing from these notes. Your transcript is intact — generate again later and only the missing stretch is redone.'
               : note.degraded_reason === 'quota'
                 ? 'The AI is out of quota right now, so these notes were structured locally. Your transcript is intact — regenerate later for a proper summary.'
                 : 'The AI was unreachable, so these notes were structured locally. Your transcript is intact — regenerate later for a proper summary.'}

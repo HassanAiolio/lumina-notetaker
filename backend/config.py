@@ -114,6 +114,8 @@ class Settings:
     # Windows every provider refused for quota get one more try after this pause:
     # rate limits are mostly per minute.
     WINDOW_RETRY_PAUSE: int = _int("WINDOW_RETRY_PAUSE", 60)
+    # How long the windows of an incomplete summary are kept for a rerun.
+    WINDOW_CACHE_TTL: int = _int("WINDOW_CACHE_TTL", 2 * 24 * 3600)
 
     # ── Slides ────────────────────────────────────────────────────────────
     # A deck's text arrives with the transcript (extracted in the browser, so

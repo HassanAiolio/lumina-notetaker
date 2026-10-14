@@ -781,6 +781,7 @@ async def summarize_in_windows(
     min_window_chars: int,
     slides: list[dict] | None = None,
     report=None,
+    cache=None,
 ) -> tuple[dict, int, int, Exception | None]:
     """Summarize window by window. Returns (merged, failed, total, last_error).
 
@@ -819,6 +820,10 @@ async def summarize_in_windows(
     step is an improvement, not a requirement: if it fails, the joined notes
     are returned as they are.
 
+    `cache`, when given, is a window_cache.WindowCache: windows written by an
+    earlier, incomplete run are taken from it instead of asked for again, and
+    once a run leaves nothing out its entries are dropped.
+
     `report(stage, done, total)`, when given, hears about each window as it
     finishes ("writing", then "retrying" for the second try) and about the
     last step ("finishing"), so a long summary can say how far along it is.
@@ -838,8 +843,39 @@ async def summarize_in_windows(
     def ordered(keys=None) -> list[dict]:
         return [parts[key] for key in sorted(parts) if keys is None or key in keys]
 
+    def slides_for(window: str) -> list[dict]:
+        # Only the slides this stretch is about, in room that shrinks with
+        # the window, so halving a refused window still makes it smaller.
+        return pick_slides(slides or [], window, min(settings.SLIDE_CONTEXT_CHARS, max(len(window) // 3, 1_500)))
+
+    def cache_key(window: str) -> str:
+        return cache.key(window, language, slides_for(window))
+
+    # Cache entries this run read or wrote, dropped if it ends complete.
+    used: list[str] = []
+    reused = {"windows": 0}
+
+    async def from_cache(window: str):
+        """An earlier run's notes for this window, or the pieces it was cut into then."""
+        hit = await cache.get(cache_key(window))
+        if hit:
+            used.append(cache_key(window))
+            reused["windows"] += 1
+            return hit
+        # Last time this window may have fallen to a provider with smaller
+        # windows and been cut to its size; those pieces may all be here.
+        for size in sorted({size for _name, _call, size in calls if size < len(window)}):
+            pieces = split_for_window(window, size)
+            if len(pieces) > 1 and all([await cache.get(cache_key(piece)) for piece in pieces]):
+                return pieces
+        return None
+
     async def write(key: tuple, window: str):
         """Notes for one window, a list of halves to requeue, or None if no provider managed."""
+        if cache:
+            found = await from_cache(window)
+            if found:
+                return found
         earlier = [parts[k] for k in sorted(parts) if k < key]
         first = ordered()[0] if parts else None
         prompt = build_prompt(
@@ -850,9 +886,7 @@ async def summarize_in_windows(
             content_type=first["type"] if first else None,
             part=(len(earlier) + 1, len(parts) + len(queue) + len(skipped) + 1),
             previous=notes_digest(earlier, carry_budget),
-            # Only the slides this stretch is about, in room that shrinks with
-            # the window, so halving a refused window still makes it smaller.
-            slides=pick_slides(slides or [], window, min(settings.SLIDE_CONTEXT_CHARS, max(len(window) // 3, 1_500))),
+            slides=slides_for(window),
         )
         for name, call, size in calls:
             if name in resting:
@@ -879,7 +913,11 @@ async def summarize_in_windows(
                 continue
             parsed = parse_json_object(answer)
             if parsed:
-                return normalize_result(parsed, requested_language=language, transcript=window)
+                result = normalize_result(parsed, requested_language=language, transcript=window)
+                if cache:
+                    await cache.put(cache_key(window), result)
+                    used.append(cache_key(window))
+                return result
             logger.warning("%s produced unparseable output for a window", name)
         return None
 
@@ -923,6 +961,12 @@ async def summarize_in_windows(
         progress("retrying")
         await asyncio.sleep(settings.WINDOW_RETRY_PAUSE)
         await run("retrying")
+
+    if reused["windows"]:
+        logger.info("Reused %d window(s) written by an earlier run", reused["windows"])
+    if cache and not skipped:
+        # Complete: asking again should write fresh notes, not return these.
+        await cache.forget(used)
 
     merged = merge_results(ordered())
     if len(parts) > 1 and merged:
@@ -971,12 +1015,14 @@ async def summarize(
     language: str = languages.AUTO,
     slides: list[dict] | None = None,
     report=None,
+    cache=None,
 ) -> dict:
     """Structured notes for `transcript`, at any length.
 
     `slides` is the lecture's deck as [{page, text}], when there is one: each
     window sees the pages it is about, and the notes cite them as [p. N].
-    `report` hears how far along it is; see summarize_in_windows.
+    `report` hears how far along it is, and `cache` lets a rerun after an
+    incomplete one redo only the missing stretches; see summarize_in_windows.
 
     The transcript is summarized in windows and merged, so the detail does not
     thin out in the middle of a long recording. Gemini is primary; Groq takes
@@ -1022,6 +1068,7 @@ async def summarize(
         min_window_chars=settings.MIN_WINDOW_CHARS,
         slides=slides,
         report=report,
+        cache=cache,
     )
 
     if merged and not failed:

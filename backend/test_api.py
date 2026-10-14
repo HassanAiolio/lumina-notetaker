@@ -18,6 +18,7 @@ import jobs  # noqa: E402
 import ratelimit  # noqa: E402
 import server  # noqa: E402
 from auth import User, current_user, hash_api_token, reading_user  # noqa: E402
+from window_cache import WindowCache  # noqa: E402
 
 
 # ── A very small async Mongo stand-in ─────────────────────────────────────────
@@ -38,6 +39,8 @@ def _matches(doc: dict, query: dict) -> bool:
                 if not re.search(condition["$regex"], haystack, flags):
                     return False
             if "$exists" in condition and (key in doc) != condition["$exists"]:
+                return False
+            if "$in" in condition and value not in condition["$in"]:
                 return False
         elif isinstance(value, list):
             if condition not in value:
@@ -159,6 +162,7 @@ class FakeDatabase:
         self.users = FakeCollection()
         self.slide_pages = FakeCollection()
         self.api_tokens = FakeCollection()
+        self.window_notes = FakeCollection()
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -448,7 +452,7 @@ def test_deleting_a_note_deletes_its_slide_pictures(client, fake_db):
 def test_summarize_hands_the_slides_on(client, monkeypatch):
     seen = {}
 
-    async def fake_summarize(transcript, language, slides=None):
+    async def fake_summarize(transcript, language, slides=None, cache=None):
         seen["slides"] = slides
         return {"title": "T", "type": "LECTURE", "language": "fr", "sections": {}, "labels": {}}
 
@@ -571,7 +575,7 @@ def wait_for_job(client, job_id, timeout=5):
 def test_notes_are_written_in_the_background_and_collected(client, monkeypatch):
     seen = {}
 
-    async def fake_summarize(transcript, language, slides=None, report=None):
+    async def fake_summarize(transcript, language, slides=None, report=None, cache=None):
         seen.update(transcript=transcript, slides=slides)
         report("writing", 1, 4)
         return NOTES
@@ -593,7 +597,7 @@ def test_notes_are_written_in_the_background_and_collected(client, monkeypatch):
 
 
 def test_a_job_belongs_to_whoever_started_it(client, monkeypatch):
-    async def fake_summarize(transcript, language, slides=None, report=None):
+    async def fake_summarize(transcript, language, slides=None, report=None, cache=None):
         return NOTES
 
     monkeypatch.setattr(server.summarizer, "summarize", fake_summarize)
@@ -608,7 +612,7 @@ def test_a_job_belongs_to_whoever_started_it(client, monkeypatch):
 
 
 def test_a_failed_job_says_so_instead_of_hanging(client, monkeypatch):
-    async def broken(transcript, language, slides=None, report=None):
+    async def broken(transcript, language, slides=None, report=None, cache=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(server.summarizer, "summarize", broken)
@@ -620,7 +624,7 @@ def test_a_failed_job_says_so_instead_of_hanging(client, monkeypatch):
 
 
 def test_a_job_past_its_deadline_is_stopped(client, monkeypatch):
-    async def endless(transcript, language, slides=None, report=None):
+    async def endless(transcript, language, slides=None, report=None, cache=None):
         await asyncio.sleep(60)
 
     monkeypatch.setattr(server.summarizer, "summarize", endless)
@@ -632,7 +636,7 @@ def test_a_job_past_its_deadline_is_stopped(client, monkeypatch):
 
 
 def test_one_person_cannot_pile_up_jobs(client, monkeypatch):
-    async def endless(transcript, language, slides=None, report=None):
+    async def endless(transcript, language, slides=None, report=None, cache=None):
         await asyncio.sleep(60)
 
     monkeypatch.setattr(server.summarizer, "summarize", endless)
@@ -643,3 +647,48 @@ def test_one_person_cannot_pile_up_jobs(client, monkeypatch):
     assert "already being written" in second.json()["detail"]
     as_user(BOB)
     assert client.post("/api/notes/summarize/jobs", json={"transcript": "Trois"}).status_code == 202
+
+
+# ── Windows kept for a rerun ──────────────────────────────────────────────────
+
+async def test_window_notes_are_kept_per_user_and_dropped_on_request(fake_db):
+    alice, bob = WindowCache(ALICE.id), WindowCache(BOB.id)
+    key = WindowCache.key("Une phrase.", "fr", [])
+
+    await alice.put(key, {"title": "A"})
+    assert await alice.get(key) == {"title": "A"}
+    assert await bob.get(key) is None          # someone else's transcript, someone else's notes
+
+    await alice.put(key, {"title": "B"})       # rewritten, not duplicated
+    assert len(fake_db.window_notes.docs) == 1
+
+    await alice.forget([key])
+    assert await alice.get(key) is None
+
+
+async def test_a_broken_window_store_never_breaks_a_summary(monkeypatch):
+    class Down:
+        def __getattr__(self, _name):
+            raise RuntimeError("database paused")
+
+    monkeypatch.setattr(db_module, "get_db", lambda: Down())
+    cache = WindowCache(ALICE.id)
+    assert await cache.get("k") is None
+    await cache.put("k", {"title": "T"})
+    await cache.forget(["k"])
+
+
+def test_summaries_are_given_the_users_window_store(client, monkeypatch):
+    seen = {}
+
+    async def fake_summarize(transcript, language, slides=None, report=None, cache=None):
+        seen["cache"] = cache
+        return NOTES
+
+    monkeypatch.setattr(server.summarizer, "summarize", fake_summarize)
+    job_id = client.post("/api/notes/summarize/jobs", json={"transcript": "Bonjour"}).json()["id"]
+    wait_for_job(client, job_id)
+    assert isinstance(seen["cache"], WindowCache) and seen["cache"].user_id == ALICE.id
+
+    client.post("/api/notes/summarize", json={"transcript": "Bonjour"})
+    assert seen["cache"].user_id == ALICE.id
