@@ -54,6 +54,8 @@ function Workspace() {
   // language without overriding the user's own "auto" choice.
   const [detectedLanguage, setDetectedLanguage] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
+  // How far the server has got with a long transcript: {stage, done, total}.
+  const [summaryProgress, setSummaryProgress] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
   const [savedCurrent, setSavedCurrent] = useState(false);
   const [currentNote, setCurrentNote] = useState(null);
@@ -162,7 +164,9 @@ function Workspace() {
     try {
       const summaryLanguage = language === 'auto' ? detectedLanguage || 'auto' : language;
       const slidesText = deck ? deck.pages.filter((page) => page.text) : [];
-      const result = await summarizeTranscript(text, summaryLanguage, slidesText);
+      const result = await summarizeTranscript(text, summaryLanguage, slidesText, {
+        onProgress: setSummaryProgress,
+      });
       const note = {
         // Regenerating rewrites the note already saved, keeping its tags.
         id: currentNote?.id,
@@ -199,6 +203,7 @@ function Workspace() {
       toast.error(errorMessage(err, 'Could not structure your notes.'));
     } finally {
       setIsSummarizing(false);
+      setSummaryProgress(null);
     }
   }, [transcript, language, detectedLanguage, deck, currentNote, persistNote]);
 
@@ -350,6 +355,7 @@ function Workspace() {
                       onLanguageChange={setLanguage}
                       languages={languages}
                       isSummarizing={isSummarizing}
+                      summaryProgress={summaryProgress}
                       onSummarize={handleSummarize}
                       onSessionChange={setSessionActive}
                       deck={deck}

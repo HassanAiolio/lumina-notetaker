@@ -83,3 +83,60 @@ it('uses the backend alone when no Worker is configured', async () => {
   expect(backend).toHaveBeenCalled();
   expect(worker).not.toHaveBeenCalled();
 });
+
+describe('summarizeTranscript', () => {
+  const running = (done, total) => ({ data: { id: 'j1', status: 'running', progress: { stage: 'writing', done, total } } });
+
+  it('starts a job and checks on it until the notes are written', async () => {
+    const post = jest.spyOn(api.client, 'post').mockResolvedValue(running(0, 3));
+    const get = jest.spyOn(api.client, 'get')
+      .mockResolvedValueOnce(running(1, 3))
+      .mockResolvedValueOnce({ data: { id: 'j1', status: 'done', result: { title: 'Cours 2' } } });
+    const progress = [];
+
+    const result = await api.summarizeTranscript('Bonjour', 'fr', [{ page: 1, text: 'x' }], {
+      onProgress: (update) => progress.push(update.done),
+      pollMs: 0,
+    });
+
+    expect(result).toEqual({ title: 'Cours 2' });
+    expect(post).toHaveBeenCalledWith('/notes/summarize/jobs', {
+      transcript: 'Bonjour', language: 'fr', slides: [{ page: 1, text: 'x' }],
+    });
+    expect(get).toHaveBeenCalledWith('/notes/summarize/jobs/j1');
+    expect(progress).toEqual([0, 1]);
+  });
+
+  it("reports the server's reason when a job fails", async () => {
+    jest.spyOn(api.client, 'post').mockResolvedValue(running(0, 2));
+    jest.spyOn(api.client, 'get').mockResolvedValue({ data: { id: 'j1', status: 'failed', error: 'Took too long.' } });
+
+    const error = await api.summarizeTranscript('Bonjour', 'fr', [], { pollMs: 0 }).catch((e) => e);
+    expect(api.errorMessage(error)).toBe('Took too long.');
+  });
+
+  it('rides out a few failed checks, but not a job the server no longer has', async () => {
+    jest.spyOn(api.client, 'post').mockResolvedValue(running(0, 2));
+    jest.spyOn(api.client, 'get')
+      .mockRejectedValueOnce(new Error('Network Error'))
+      .mockRejectedValueOnce(failure(503))
+      .mockResolvedValueOnce({ data: { id: 'j1', status: 'done', result: { title: 'T' } } });
+    expect(await api.summarizeTranscript('Bonjour', 'fr', [], { pollMs: 0 })).toEqual({ title: 'T' });
+
+    api.client.get.mockReset();
+    api.client.get.mockRejectedValue(failure(404, { detail: 'The server may have restarted: try again.' }));
+    const error = await api.summarizeTranscript('Bonjour', 'fr', [], { pollMs: 0 }).catch((e) => e);
+    expect(api.errorMessage(error)).toContain('restarted');
+    expect(api.client.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the single request on a backend that has no jobs yet', async () => {
+    const post = jest.spyOn(api.client, 'post')
+      .mockRejectedValueOnce(failure(404))
+      .mockResolvedValueOnce({ data: { title: 'Old way' } });
+
+    expect(await api.summarizeTranscript('Bonjour')).toEqual({ title: 'Old way' });
+    expect(post.mock.calls[1][0]).toBe('/notes/summarize');
+    expect(post.mock.calls[1][2]).toEqual({ timeout: api.SUMMARIZE_TIMEOUT_MS });
+  });
+});

@@ -58,6 +58,9 @@ class Settings:
     # makes the fallback chain worth having: a Gemini quota error takes out
     # every Gemini model at once, so the only useful next step is elsewhere.
     GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+    # Used when the main key is rate limited. Groq counts limits per account,
+    # so this only helps if it comes from a different Groq account.
+    GROQ_API_KEY_BACKUP: str = os.environ.get("GROQ_API_KEY_BACKUP", "")
     GROQ_TEXT_MODELS: list[str] = _csv(
         "GROQ_TEXT_MODELS", "openai/gpt-oss-120b,qwen/qwen3.8-27b,openai/gpt-oss-20b"
     )
@@ -126,6 +129,11 @@ class Settings:
     # Per personal API token, across everything it reads.
     RATE_LIMIT_TOKEN: tuple[int, int] = (_int("RATE_LIMIT_TOKEN_REQUESTS", 120), _int("RATE_LIMIT_TOKEN_WINDOW", 60))
     MAX_API_TOKENS: int = _int("MAX_API_TOKENS", 10)
+    # Notes are written as a background job the app polls. A job past the deadline
+    # is stopped; a finished one is kept this long for the app to collect.
+    SUMMARY_JOB_DEADLINE: int = _int("SUMMARY_JOB_DEADLINE", 30 * 60)
+    SUMMARY_JOB_TTL: int = _int("SUMMARY_JOB_TTL", 30 * 60)
+    MAX_SUMMARY_JOBS: int = _int("MAX_SUMMARY_JOBS", 2)
 
     APP_VERSION: str = os.environ.get("APP_VERSION", "2.0.0")
 
@@ -138,12 +146,16 @@ class Settings:
         return bool(self.GOOGLE_CLIENT_ID)
 
     @property
+    def groq_keys(self) -> list[str]:
+        return [key for key in (self.GROQ_API_KEY, self.GROQ_API_KEY_BACKUP) if key]
+
+    @property
     def groq_configured(self) -> bool:
-        return bool(self.GROQ_API_KEY)
+        return bool(self.groq_keys)
 
     @property
     def ai_configured(self) -> bool:
-        return bool(self.GEMINI_API_KEY or self.GROQ_API_KEY)
+        return bool(self.GEMINI_API_KEY or self.groq_keys)
 
 
 settings = Settings()

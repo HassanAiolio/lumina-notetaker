@@ -58,8 +58,20 @@ async def close_http_client() -> None:
     _client = None
 
 
+# Which key requests go out with. It moves on when one is rate limited and stays
+# there, since the key that was refused will still be refused for a while.
+_key_index = 0
+
+
 def _auth() -> dict:
-    return {"Authorization": f"Bearer {settings.GROQ_API_KEY}"}
+    keys = settings.groq_keys
+    return {"Authorization": f"Bearer {keys[_key_index % len(keys)]}"}
+
+
+def _next_key() -> int:
+    global _key_index
+    _key_index = (_key_index + 1) % len(settings.groq_keys)
+    return _key_index
 
 
 # "Please retry in 27.584225593s" - Groq puts the wait in the message as well as
@@ -92,14 +104,18 @@ async def _attempt(models: list[str], send, what: str):
 
     `send` returns the parsed result, or raises GroqError to move on.
     """
-    if not settings.GROQ_API_KEY:
+    if not settings.groq_keys:
         raise GroqError("GROQ_API_KEY is not configured")
 
     client = get_http_client()
     last_error: GroqError | None = None
 
     for model in models:
-        for attempt in range(1, settings.GROQ_MAX_ATTEMPTS + 1):
+        # Limits are per model, so every model gets a turn with every key.
+        keys_tried = 1
+        attempt = 0
+        while attempt < settings.GROQ_MAX_ATTEMPTS:
+            attempt += 1
             response = None
             try:
                 response = await send(client, model)
@@ -118,6 +134,13 @@ async def _attempt(models: list[str], send, what: str):
                     quota=quota,
                 )
                 logger.warning("Groq %s %s HTTP %d: %s", what, model, response.status_code, body)
+                if response.status_code == 429 and keys_tried < len(settings.groq_keys):
+                    # Another key is a fresh try, not a retry: no waiting out
+                    # the limit, and it does not use up an attempt.
+                    keys_tried += 1
+                    logger.warning("Groq key rate limited on %s; switching to key %d", model, _next_key() + 1)
+                    attempt -= 1
+                    continue
                 if response.status_code not in RETRYABLE_STATUS:
                     break  # bad request or unknown model; a different model may still work
 

@@ -22,6 +22,7 @@ from starlette.middleware.cors import CORSMiddleware  # noqa: E402
 
 import db  # noqa: E402
 import gemini  # noqa: E402
+import jobs  # noqa: E402
 import languages  # noqa: E402
 import ratelimit  # noqa: E402
 import summarizer  # noqa: E402
@@ -290,6 +291,45 @@ async def summarize_transcript(req: SummarizeRequest, user: User = Depends(curre
             "Returned degraded notes to %s (%s)", user.email, result.get("degraded_reason")
         )
     return SummarizeResponse(**result)
+
+
+@api.post("/notes/summarize/jobs", status_code=status.HTTP_202_ACCEPTED)
+async def start_summary_job(req: SummarizeRequest, user: User = Depends(current_user)):
+    """Start writing notes in the background; poll the job for progress and the result.
+
+    The same work as /notes/summarize, which a long lecture can keep busy for
+    longer than a browser will wait on one request.
+    """
+    ratelimit.check(f"ai:{user.id}", *settings.RATE_LIMIT_AI)
+    if jobs.running_for(user.id) >= settings.MAX_SUMMARY_JOBS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Notes are already being written for you. Wait for them to finish first.",
+        )
+
+    slides = [page.model_dump() for page in req.slides]
+
+    async def work(report) -> dict:
+        result = await summarizer.summarize(req.transcript, req.language, slides=slides, report=report)
+        if result.get("degraded"):
+            logger.warning(
+                "Returned degraded notes to %s (%s)", user.email, result.get("degraded_reason")
+            )
+        return SummarizeResponse(**result).model_dump()
+
+    return jobs.start(user.id, work).public()
+
+
+@api.get("/notes/summarize/jobs/{job_id}")
+async def get_summary_job(job_id: str, user: User = Depends(current_user)):
+    job = jobs.get(job_id, user.id)
+    if not job:
+        # Unknown, someone else's, collected long ago, or lost to a restart.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Those notes are no longer being written. The server may have restarted: try again.",
+        )
+    return job.public()
 
 
 # ── Notes (scoped to the signed-in user) ──────────────────────────────────────

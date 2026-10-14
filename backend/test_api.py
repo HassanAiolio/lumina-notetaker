@@ -3,7 +3,9 @@
 The point of these is the ownership boundary: one account must never be able to
 read, change or delete another account's notes.
 """
+import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).parent))
 
 import db as db_module  # noqa: E402
+import jobs  # noqa: E402
 import ratelimit  # noqa: E402
 import server  # noqa: E402
 from auth import User, current_user, hash_api_token, reading_user  # noqa: E402
@@ -170,6 +173,7 @@ def fake_db(monkeypatch):
     monkeypatch.setattr(db_module, "get_db", lambda: database)
     monkeypatch.setattr(server.db, "get_db", lambda: database)
     ratelimit.reset()
+    jobs.reset()
     return database
 
 
@@ -547,3 +551,95 @@ def test_tokens_need_a_name_and_are_capped(client, monkeypatch):
     response = client.post("/api/tokens", json={"name": "three"})
     assert response.status_code == 400
     assert "Revoke one" in response.json()["detail"]
+
+
+# ── Notes written as a background job ─────────────────────────────────────────
+
+NOTES = {"title": "Cours 2", "type": "LECTURE", "language": "fr", "sections": {"overview": ["Descente de gradient"]}}
+
+
+def wait_for_job(client, job_id, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/notes/summarize/jobs/{job_id}").json()
+        if body["status"] != "running":
+            return body
+        time.sleep(0.02)
+    raise AssertionError("the job never finished")
+
+
+def test_notes_are_written_in_the_background_and_collected(client, monkeypatch):
+    seen = {}
+
+    async def fake_summarize(transcript, language, slides=None, report=None):
+        seen.update(transcript=transcript, slides=slides)
+        report("writing", 1, 4)
+        return NOTES
+
+    monkeypatch.setattr(server.summarizer, "summarize", fake_summarize)
+    started = client.post("/api/notes/summarize/jobs", json={
+        "transcript": "Bonjour", "language": "fr", "slides": [{"page": 2, "text": "Gradient"}],
+    })
+    assert started.status_code == 202
+    assert started.json()["status"] == "running"
+
+    done = wait_for_job(client, started.json()["id"])
+    assert done["status"] == "done"
+    assert done["progress"] == {"stage": "writing", "done": 1, "total": 4}
+    assert done["result"]["title"] == "Cours 2"
+    assert done["result"]["sections"]["overview"] == ["Descente de gradient"]
+    assert done["result"]["degraded"] is False
+    assert seen == {"transcript": "Bonjour", "slides": [{"page": 2, "text": "Gradient"}]}
+
+
+def test_a_job_belongs_to_whoever_started_it(client, monkeypatch):
+    async def fake_summarize(transcript, language, slides=None, report=None):
+        return NOTES
+
+    monkeypatch.setattr(server.summarizer, "summarize", fake_summarize)
+    job_id = client.post("/api/notes/summarize/jobs", json={"transcript": "Bonjour"}).json()["id"]
+    wait_for_job(client, job_id)
+
+    as_user(BOB)
+    assert client.get(f"/api/notes/summarize/jobs/{job_id}").status_code == 404
+    response = client.get("/api/notes/summarize/jobs/no-such-job")
+    assert response.status_code == 404
+    assert "restarted" in response.json()["detail"]
+
+
+def test_a_failed_job_says_so_instead_of_hanging(client, monkeypatch):
+    async def broken(transcript, language, slides=None, report=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(server.summarizer, "summarize", broken)
+    job_id = client.post("/api/notes/summarize/jobs", json={"transcript": "Bonjour"}).json()["id"]
+    failed = wait_for_job(client, job_id)
+    assert failed["status"] == "failed"
+    assert "try again" in failed["error"]
+    assert "boom" not in failed["error"]
+
+
+def test_a_job_past_its_deadline_is_stopped(client, monkeypatch):
+    async def endless(transcript, language, slides=None, report=None):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(server.summarizer, "summarize", endless)
+    monkeypatch.setattr(jobs.settings, "SUMMARY_JOB_DEADLINE", 0.05)
+    job_id = client.post("/api/notes/summarize/jobs", json={"transcript": "Bonjour"}).json()["id"]
+    stopped = wait_for_job(client, job_id)
+    assert stopped["status"] == "failed"
+    assert "took longer" in stopped["error"]
+
+
+def test_one_person_cannot_pile_up_jobs(client, monkeypatch):
+    async def endless(transcript, language, slides=None, report=None):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(server.summarizer, "summarize", endless)
+    monkeypatch.setattr(server.settings, "MAX_SUMMARY_JOBS", 1)
+    assert client.post("/api/notes/summarize/jobs", json={"transcript": "Un"}).status_code == 202
+    second = client.post("/api/notes/summarize/jobs", json={"transcript": "Deux"})
+    assert second.status_code == 429
+    assert "already being written" in second.json()["detail"]
+    as_user(BOB)
+    assert client.post("/api/notes/summarize/jobs", json={"transcript": "Trois"}).status_code == 202

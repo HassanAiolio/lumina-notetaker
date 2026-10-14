@@ -770,6 +770,7 @@ async def test_groq_is_skipped_entirely_when_no_key_is_set(monkeypatch):
 
     monkeypatch.setattr(summarizer, "generate", _gemini_is_down)
     monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "")
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY_BACKUP", "")
     monkeypatch.setattr(groq, "generate", should_not_run)
 
     result = await summarizer.summarize("Court transcript. Deux phrases.", "fr")
@@ -1007,3 +1008,83 @@ async def test_without_slides_no_page_reference_survives(monkeypatch):
     monkeypatch.setattr(summarizer, "generate", gemini_answer)
     result = await summarizer.summarize("Un cours.", "fr")
     assert result["sections"]["definitions"] == ["**A** : b"]
+
+
+async def test_summarize_reports_each_window_then_the_last_step(monkeypatch):
+    # A long lecture is minutes of work; the app shows "part 2 of 4" from this.
+    async def gemini_ok(_parts, **_k):
+        return NOTES_JSON % "Point"
+
+    monkeypatch.setattr(summarizer, "generate", gemini_ok)
+    monkeypatch.setattr(summarizer.settings, "GEMINI_WINDOW_CHARS", 8_000)
+    transcript = _long_transcript()
+    windows = len(summarizer.split_for_window(transcript, 8_000))
+    seen = []
+
+    await summarizer.summarize(transcript, "fr", report=lambda *update: seen.append(update))
+
+    assert windows > 1
+    assert seen[0] == ("writing", 0, windows)
+    assert ("writing", 1, windows) in seen
+    assert seen[-2:] == [("writing", windows, windows), ("finishing", windows, windows)]
+
+
+async def test_a_rate_limited_groq_key_hands_over_to_the_backup(monkeypatch):
+    # Waiting out a rate limit costs up to GROQ_MAX_RETRY_WAIT per try; a second
+    # account's key is answered at once. And the limited key is left alone after.
+    used = []
+    slept = []
+
+    def handler(request):
+        key = request.headers["authorization"].split()[-1]
+        used.append(key)
+        if key == "main":
+            return httpx.Response(429, json={"error": {"message": "Rate limit reached. Please retry in 30s"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+
+    async def record_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY", "main")
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY_BACKUP", "backup")
+    monkeypatch.setattr(groq, "_key_index", 0)
+    monkeypatch.setattr(groq.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(groq, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    await groq.generate("p", models=["m"])
+    await groq.generate("p", models=["m"])
+
+    assert used == ["main", "backup", "backup"]
+    assert slept == []
+
+
+async def test_when_every_groq_key_is_limited_it_waits_as_before(monkeypatch):
+    used = []
+    slept = []
+
+    def handler(request):
+        used.append(request.headers["authorization"].split()[-1])
+        if len(used) <= 2:
+            return httpx.Response(429, json={"error": {"message": "Please retry in 2s"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+
+    async def record_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY", "main")
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY_BACKUP", "backup")
+    monkeypatch.setattr(groq, "_key_index", 0)
+    monkeypatch.setattr(groq.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(groq, "_client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    await groq.generate("p", models=["m"])
+
+    assert used == ["main", "backup", "backup"]
+    assert slept == [2.5]  # the advertised wait, once both keys had said no
+
+
+def test_the_backup_key_alone_still_counts_as_configured(monkeypatch):
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY", "")
+    monkeypatch.setattr(groq.settings, "GROQ_API_KEY_BACKUP", "backup")
+    assert groq.settings.groq_configured
+    assert groq.settings.groq_keys == ["backup"]

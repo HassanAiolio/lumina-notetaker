@@ -779,6 +779,7 @@ async def summarize_in_windows(
     window_chars: int,
     min_window_chars: int,
     slides: list[dict] | None = None,
+    report=None,
 ) -> tuple[dict, int, int, Exception | None]:
     """Summarize window by window. Returns (merged, failed, total, last_error).
 
@@ -805,6 +806,10 @@ async def summarize_in_windows(
     title, the overview, what to remember - from the joined notes. That last
     step is an improvement, not a requirement: if it fails, the joined notes
     are returned as they are.
+
+    `report(stage, done, total)`, when given, hears about each window as it
+    finishes ("writing") and about the last step ("finishing"), so a long
+    summary can say how far along it is.
     """
     pending = deque(split_for_window(transcript, window_chars))
     if len(pending) > 1:
@@ -820,6 +825,12 @@ async def summarize_in_windows(
     # that refuses everything cannot spin.
     budget = 4 * len(pending) + 8
 
+    def progress(stage: str) -> None:
+        if report:
+            done = len(parts) + failed
+            report(stage, done, done + len(pending))
+
+    progress("writing")
     while pending and budget > 0:
         budget -= 1
         window = pending.popleft()
@@ -853,19 +864,23 @@ async def summarize_in_windows(
             failed += 1
             last_error = exc
             logger.warning("Window failed, continuing without it: %s", exc)
+            progress("writing")
             continue
 
         parsed = parse_json_object(answer)
         if not parsed:
             failed += 1
             logger.warning("Window produced unparseable output, skipping it")
+            progress("writing")
             continue
         parts.append(
             normalize_result(parsed, requested_language=language, transcript=window)
         )
+        progress("writing")
 
     merged = merge_results(parts)
     if len(parts) > 1 and merged:
+        progress("finishing")
         merged = await synthesize(merged, language, call=call, budget=window_chars)
     return merged, failed, total, last_error
 
@@ -893,12 +908,16 @@ async def synthesize(merged: dict, language: str, *, call, budget: int) -> dict:
 
 
 async def summarize(
-    transcript: str, language: str = languages.AUTO, slides: list[dict] | None = None
+    transcript: str,
+    language: str = languages.AUTO,
+    slides: list[dict] | None = None,
+    report=None,
 ) -> dict:
     """Structured notes for `transcript`, at any length.
 
     `slides` is the lecture's deck as [{page, text}], when there is one: each
     window sees the pages it is about, and the notes cite them as [p. N].
+    `report` hears how far along it is; see summarize_in_windows.
 
     Both providers summarize in windows and merge, so the detail does not thin
     out in the middle of a long recording. Gemini is primary; Groq is tried
@@ -947,6 +966,7 @@ async def summarize(
                 window_chars=window_chars,
                 min_window_chars=settings.MIN_WINDOW_CHARS,
                 slides=slides,
+                report=report,
             )
         except (GeminiError, groq.GroqError) as exc:
             last_error = exc

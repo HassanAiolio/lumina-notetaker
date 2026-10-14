@@ -64,6 +64,18 @@ const decodeErrorMessage = (err) => {
   }
 };
 
+/**
+ * What the button says while notes are written. A two hour lecture is several
+ * minutes of work, and "Structuring…" alone for that long looks stuck.
+ */
+export const summaryLabel = (progress) => {
+  if (progress?.stage === 'finishing') return 'Writing the overview…';
+  if (progress?.stage === 'writing' && progress.total > 1) {
+    return `Structuring your notes… part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`;
+  }
+  return 'Structuring your notes…';
+};
+
 export const Recorder = ({
   transcript,
   onTranscriptChange,
@@ -71,6 +83,7 @@ export const Recorder = ({
   onLanguageChange,
   languages,
   isSummarizing,
+  summaryProgress,
   onSummarize,
   onRecordingChange,
   onTranscribingChange,
@@ -904,7 +917,7 @@ export const Recorder = ({
               {isSummarizing ? (
                 <span className="flex items-center gap-2">
                   <Loader2 size={16} className="animate-spin" />
-                  Structuring your notes…
+                  {summaryLabel(summaryProgress)}
                 </span>
               ) : (
                 <span className="flex items-center gap-2">

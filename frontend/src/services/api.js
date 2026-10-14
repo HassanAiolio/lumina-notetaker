@@ -82,8 +82,12 @@ client.interceptors.response.use(
   },
 );
 
+/** A failure the app reports in its own words, with no HTTP response behind it. */
+export class ReportedError extends Error {}
+
 /** A message worth showing a user, out of any axios failure. */
 export const errorMessage = (error, fallback = 'Something went wrong.') => {
+  if (error instanceof ReportedError) return error.message;
   const detail = error?.response?.data?.detail;
   if (typeof detail === 'string' && detail) return detail;
   if (Array.isArray(detail) && detail[0]?.msg) return detail[0].msg;
@@ -184,19 +188,65 @@ export const transcribeChunk = async ({ blob, language = 'auto', context = '', s
 };
 
 // Summarizing walks a long transcript window by window, and a rate-limited
-// provider is waited out rather than skipped, so this is the one call that
-// legitimately runs for minutes. The default timeout would cut it off.
+// provider is waited out rather than skipped, so it can run for many minutes.
+// It used to be one request: on a two hour lecture the browser gave up at ten
+// minutes, the server finished anyway, and the notes were lost. Now the server
+// writes them as a job and the app checks on it until it is done.
 export const SUMMARIZE_TIMEOUT_MS = 10 * 60 * 1000;
+export const SUMMARY_POLL_MS = 3000;
+// The server stops a job at 30 minutes. This only covers one that went quiet.
+export const SUMMARY_GIVE_UP_MS = 35 * 60 * 1000;
+// A dropped connection or a server waking up is worth this many more checks.
+const SUMMARY_POLL_MISSES = 5;
 
-// `slides` is the deck's text, [{page, text}], when one is attached.
-export const summarizeTranscript = async (transcript, language = 'auto', slides = []) =>
-  (
-    await client.post(
-      '/notes/summarize',
-      { transcript, language, slides },
-      { timeout: SUMMARIZE_TIMEOUT_MS },
-    )
-  ).data;
+/** The old single request, for a backend that has no jobs yet: the frontend deploys first. */
+const summarizeInOneRequest = async (body) =>
+  (await client.post('/notes/summarize', body, { timeout: SUMMARIZE_TIMEOUT_MS })).data;
+
+/**
+ * Structured notes for a transcript. `slides` is the deck's text, [{page,
+ * text}], when one is attached. `onProgress({stage, done, total})` hears how
+ * far along the server is: "writing" part `done` of `total`, then "finishing".
+ */
+export const summarizeTranscript = async (
+  transcript,
+  language = 'auto',
+  slides = [],
+  { onProgress, pollMs = SUMMARY_POLL_MS } = {},
+) => {
+  const body = { transcript, language, slides };
+  let job;
+  try {
+    job = (await client.post('/notes/summarize/jobs', body)).data;
+  } catch (error) {
+    if (error?.response?.status === 404 || error?.response?.status === 405) return summarizeInOneRequest(body);
+    throw error;
+  }
+
+  const started = Date.now();
+  let misses = 0;
+  while (job.status === 'running') {
+    onProgress?.(job.progress);
+    if (Date.now() - started > SUMMARY_GIVE_UP_MS) {
+      throw new ReportedError('Writing these notes is taking far longer than it should. Please try again.');
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(pollMs);
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      job = (await client.get(`/notes/summarize/jobs/${encodeURIComponent(job.id)}`)).data;
+      misses = 0;
+    } catch (error) {
+      // Gone for good (the server restarted) is not worth asking again about.
+      misses += 1;
+      if (error?.response?.status === 404 || misses > SUMMARY_POLL_MISSES) throw error;
+    }
+  }
+  if (job.status === 'failed') {
+    throw new ReportedError(job.error || 'Could not structure your notes.');
+  }
+  return job.result;
+};
 
 /** Keep the picture of one cited slide page with a saved note. */
 export const putSlidePage = async (noteId, page, blob) =>
