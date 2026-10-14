@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import math
+import re
 import struct
 import sys
 import wave
@@ -30,6 +31,16 @@ import summarizer  # noqa: E402
 import loops  # noqa: E402
 import transcription  # noqa: E402
 from models import NoteCreate, NoteUpdate, SummarizeRequest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def offline_providers(monkeypatch):
+    # Keys from a local .env would send a test that only fakes Gemini on to the
+    # real Groq API. A test that wants Groq sets a key of its own.
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "")
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY_BACKUP", "")
+    # A window that hit a rate limit is retried after a pause; tests need not wait.
+    monkeypatch.setattr(summarizer.settings, "WINDOW_RETRY_PAUSE", 0)
 
 
 # ── Language detection ────────────────────────────────────────────────────────
@@ -696,28 +707,88 @@ async def _gemini_is_down(*_a, **_k):
     raise gemini.GeminiError("forced outage", quota=True)
 
 
-async def test_groq_salvages_the_windows_that_worked(monkeypatch):
-    # Losing one window is a gap; throwing away the rest to return a local
-    # extraction instead would be worse.
+async def test_groq_takes_over_the_windows_gemini_runs_out_on(monkeypatch):
+    # The bug: Gemini did the first windows, ran out, and Groq started again
+    # from the top with holes of its own; the notes kept one run or the other.
+    # Now each window falls to Groq, and the parts join up in order.
+    gemini_calls = {"n": 0}
+
+    async def gemini_then_quota(parts, **_k):
+        gemini_calls["n"] += 1
+        if gemini_calls["n"] > 1:
+            raise gemini.GeminiError("quota", quota=True)
+        return NOTES_JSON % "Gemini 1"
+
+    async def groq_ok(prompt, **_k):
+        return NOTES_JSON % f"Groq {prompt.count('Phrase')}"
+
+    monkeypatch.setattr(summarizer, "generate", gemini_then_quota)
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "k")
+    monkeypatch.setattr(summarizer.settings, "GEMINI_WINDOW_CHARS", 8_000)
+    monkeypatch.setattr(groq, "generate", groq_ok)
+
+    result = await summarizer.summarize(_long_transcript(), "fr")
+
+    overview = result["sections"]["overview"]
+    assert result["degraded"] is False
+    assert overview[0] == "Gemini 1"
+    assert all(point.startswith("Groq") for point in overview[1:]) and len(overview) > 2
+    # Rested after its quota error, not asked again for every window; the
+    # one more call is the overview at the end, which also falls to Groq.
+    assert gemini_calls["n"] == 2
+
+
+async def test_a_window_skipped_for_a_rate_limit_is_tried_again_in_its_place(monkeypatch):
     calls = {"n": 0}
+    pauses = []
+
+    def first_sentence(prompt):
+        # Which stretch this is: the lowest sentence number in its transcript.
+        return min(int(n) for n in re.findall(r"numero (\d+)\.", prompt))
 
     async def flaky(prompt, **_k):
         calls["n"] += 1
         if calls["n"] == 2:
             raise groq.GroqError("rate limited", status_code=429, quota=True)
-        return NOTES_JSON % f"Point {calls['n']}"
+        if _is_synthesis(prompt):
+            raise groq.GroqError("no synthesis needed here")
+        return NOTES_JSON % f"From {first_sentence(prompt)}"
+
+    async def record_pause(seconds):
+        pauses.append(seconds)
 
     monkeypatch.setattr(summarizer, "generate", _gemini_is_down)
     monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "k")
     monkeypatch.setattr(summarizer.settings, "GROQ_WINDOW_CHARS", 8_000)
+    monkeypatch.setattr(summarizer.settings, "WINDOW_RETRY_PAUSE", 60)
+    monkeypatch.setattr(summarizer.asyncio, "sleep", record_pause)
     monkeypatch.setattr(groq, "generate", flaky)
 
     result = await summarizer.summarize(_long_transcript(), "fr")
 
-    assert result["sections"]["overview"]          # kept what succeeded
-    assert result["degraded"] is True              # but says it is incomplete
+    assert result["degraded"] is False             # nothing left out after the retry
+    assert pauses == [60]                          # once, after the first pass
+    starts = [int(point.split()[-1]) for point in result["sections"]["overview"]]
+    assert starts[0] == 0 and starts == sorted(starts)  # in transcript order, gap filled
+    assert len(starts) > 3
+
+
+async def test_a_window_that_never_works_is_a_flagged_gap_not_a_lost_lecture(monkeypatch):
+    async def window_two_always_fails(prompt, **_k):
+        if "numero 300." in prompt:
+            raise groq.GroqError("rate limited", status_code=429, quota=True)
+        return NOTES_JSON % "Kept"
+
+    monkeypatch.setattr(summarizer, "generate", _gemini_is_down)
+    monkeypatch.setattr(summarizer.settings, "GROQ_API_KEY", "k")
+    monkeypatch.setattr(summarizer.settings, "GROQ_WINDOW_CHARS", 8_000)
+    monkeypatch.setattr(groq, "generate", window_two_always_fails)
+
+    result = await summarizer.summarize(_long_transcript(), "fr")
+
+    assert result["sections"]["overview"] == ["Kept"]  # the rest survives, deduplicated
+    assert result["degraded"] is True
     assert result["degraded_reason"] == "partial"
-    assert "Point 1" in result["sections"]["overview"]
 
 
 async def test_a_window_refused_as_too_large_is_halved_not_dropped(monkeypatch):

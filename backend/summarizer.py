@@ -1,4 +1,5 @@
 """Turn a raw transcript into structured notes, in the transcript's own language."""
+import asyncio
 import logging
 import math
 import re
@@ -775,7 +776,7 @@ async def summarize_in_windows(
     transcript: str,
     language: str,
     *,
-    call,
+    calls: list[tuple[str, object, int]],
     window_chars: int,
     min_window_chars: int,
     slides: list[dict] | None = None,
@@ -783,21 +784,32 @@ async def summarize_in_windows(
 ) -> tuple[dict, int, int, Exception | None]:
     """Summarize window by window. Returns (merged, failed, total, last_error).
 
-    Every transcript long enough to need it goes through this, whichever
-    provider is answering, for two separate reasons.
+    Every transcript long enough to need it goes through this, for two
+    separate reasons. The hard one is size: Groq's free tier refuses a request
+    over a few thousand tokens outright. The soft one matters more often - a
+    model asked to summarize an hour in one pass covers the start and the end
+    and thins out in the middle. Summarizing each stretch on its own and
+    merging keeps the detail even where the transcript is long.
 
-    The hard one is size: Groq's free tier refuses a request over a few
-    thousand tokens outright. The soft one matters more often - a model asked
-    to summarize an hour in one pass covers the start and the end and thins out
-    in the middle. Summarizing each stretch on its own and merging keeps the
-    detail even where the transcript is long, which is why this is not reserved
-    for the provider that forces it.
+    `calls` are the providers as [(name, call, window size)], best first.
+    `window_chars` is where windows start; a provider whose own size is
+    smaller has the window cut down to it first. Each window tries
+    them in turn, so when Gemini runs out of quota halfway through a lecture,
+    Groq writes the rest and the halves join up. It used to be the whole
+    transcript per provider: Gemini skipped what it could not do, Groq started
+    again from the top and skipped what it could not do, and the notes kept
+    whichever run had fewer holes, with a stretch missing from both. A provider
+    that says it is out of quota is rested for the rest of the pass rather than
+    asked again for every window.
 
     A window refused for its size is halved and requeued rather than written
-    off, so the configured size is a starting guess: a language that packs more
-    tokens into the same characters settles on a smaller window by itself.
-    A window that fails any other way is counted and skipped, because losing
-    one stretch beats discarding the rest.
+    off, so the configured size is a starting guess: a provider or a language
+    that needs smaller windows settles on them by itself.
+
+    A window that every provider refused for quota is not lost either: rate
+    limits are mostly per minute, so once the pass is over and after a pause,
+    those windows get one more try. Parts are kept in transcript order however
+    late they arrive.
 
     Windows are not summarized blind. Each one is shown the notes the earlier
     ones produced, and keeps the first window's type and language, so the
@@ -808,81 +820,128 @@ async def summarize_in_windows(
     are returned as they are.
 
     `report(stage, done, total)`, when given, hears about each window as it
-    finishes ("writing") and about the last step ("finishing"), so a long
-    summary can say how far along it is.
+    finishes ("writing", then "retrying" for the second try) and about the
+    last step ("finishing"), so a long summary can say how far along it is.
     """
-    pending = deque(split_for_window(transcript, window_chars))
-    if len(pending) > 1:
-        logger.info("Transcript split into %d windows", len(pending))
+    windows = split_for_window(transcript, window_chars)
+    if len(windows) > 1:
+        logger.info("Transcript split into %d windows", len(windows))
     # The notes carried forward have to leave the window most of the request.
     carry_budget = min(settings.NOTES_CARRY_CHARS, window_chars // 4)
 
-    parts: list[dict] = []
-    failed = 0
-    total = 0
-    last_error: Exception | None = None
-    # Halving is bounded by the floor, but cap the work anyway so a provider
-    # that refuses everything cannot spin.
-    budget = 4 * len(pending) + 8
+    # Keyed by position in the transcript. A halved window's pieces get the
+    # parent's key plus their own index, so they sort where the parent was.
+    parts: dict[tuple, dict] = {}
+    resting: set[str] = set()
+    state = {"last_error": None, "quota": False}
 
-    def progress(stage: str) -> None:
-        if report:
-            done = len(parts) + failed
-            report(stage, done, done + len(pending))
+    def ordered(keys=None) -> list[dict]:
+        return [parts[key] for key in sorted(parts) if keys is None or key in keys]
 
-    progress("writing")
-    while pending and budget > 0:
-        budget -= 1
-        window = pending.popleft()
-        total += 1
-        first = parts[0] if parts else None
+    async def write(key: tuple, window: str):
+        """Notes for one window, a list of halves to requeue, or None if no provider managed."""
+        earlier = [parts[k] for k in sorted(parts) if k < key]
+        first = ordered()[0] if parts else None
         prompt = build_prompt(
             window,
             # "auto" asked of every window let a part with a long quotation
             # in it switch languages; the first window has already settled it.
             first["language"] if first and language == languages.AUTO else language,
             content_type=first["type"] if first else None,
-            part=(len(parts) + 1, len(parts) + len(pending) + 1),
-            previous=notes_digest(parts, carry_budget),
+            part=(len(earlier) + 1, len(parts) + len(queue) + len(skipped) + 1),
+            previous=notes_digest(earlier, carry_budget),
             # Only the slides this stretch is about, in room that shrinks with
             # the window, so halving a refused window still makes it smaller.
             slides=pick_slides(slides or [], window, min(settings.SLIDE_CONTEXT_CHARS, max(len(window) // 3, 1_500))),
         )
-        try:
-            answer = await call(prompt)
-        except (GeminiError, groq.GroqError) as exc:
-            halves = (
-                split_for_window(window, max(len(window) // 2, min_window_chars))
-                if _is_too_large(exc)
-                else [window]
-            )
-            if len(halves) > 1:
-                logger.info("Window of %d chars refused as too large; halving", len(window))
-                total -= 1  # not yet attempted at this size
-                pending.extendleft(reversed(halves))
+        for name, call, size in calls:
+            if name in resting:
                 continue
-            failed += 1
-            last_error = exc
-            logger.warning("Window failed, continuing without it: %s", exc)
-            progress("writing")
-            continue
+            if len(window) > size:
+                pieces = split_for_window(window, size)
+                if len(pieces) > 1:
+                    return pieces
+            try:
+                answer = await call(prompt)
+            except (GeminiError, groq.GroqError) as exc:
+                if _is_too_large(exc):
+                    halves = split_for_window(window, max(len(window) // 2, min_window_chars))
+                    if len(halves) > 1:
+                        logger.info("Window of %d chars refused as too large by %s; halving", len(window), name)
+                        return halves
+                state["last_error"] = exc
+                if getattr(exc, "quota", False):
+                    state["quota"] = True
+                    resting.add(name)
+                    logger.warning("%s is out of quota; resting it for this pass", name)
+                else:
+                    logger.warning("%s could not write a window: %s", name, exc)
+                continue
+            parsed = parse_json_object(answer)
+            if parsed:
+                return normalize_result(parsed, requested_language=language, transcript=window)
+            logger.warning("%s produced unparseable output for a window", name)
+        return None
 
-        parsed = parse_json_object(answer)
-        if not parsed:
-            failed += 1
-            logger.warning("Window produced unparseable output, skipping it")
-            progress("writing")
-            continue
-        parts.append(
-            normalize_result(parsed, requested_language=language, transcript=window)
+    def progress(stage: str) -> None:
+        if report:
+            done = len(parts) + len(skipped)
+            report(stage, done, done + len(queue))
+
+    async def run(stage: str) -> None:
+        """Work through the queue, setting aside the windows no provider managed."""
+        # Halving is bounded by the floor, but cap the work anyway so a
+        # provider that refuses everything cannot spin.
+        budget = 4 * len(queue) + 8
+        progress(stage)
+        while queue and budget > 0:
+            budget -= 1
+            key, window = queue.popleft()
+            outcome = await write(key, window)
+            if isinstance(outcome, list):
+                queue.extendleft(reversed([(key + (index,), half) for index, half in enumerate(outcome)]))
+                continue
+            if outcome is None:
+                skipped.append((key, window))
+            else:
+                parts[key] = outcome
+            progress(stage)
+
+    queue = deque(((index,), window) for index, window in enumerate(windows))
+    skipped: list[tuple[tuple, str]] = []
+    await run("writing")
+
+    if skipped and state["quota"]:
+        logger.info(
+            "%d window(s) hit a rate limit; trying them again in %ss",
+            len(skipped), settings.WINDOW_RETRY_PAUSE,
         )
-        progress("writing")
+        queue.extend(skipped)
+        skipped.clear()
+        resting.clear()
+        state["quota"] = False
+        progress("retrying")
+        await asyncio.sleep(settings.WINDOW_RETRY_PAUSE)
+        await run("retrying")
 
-    merged = merge_results(parts)
+    merged = merge_results(ordered())
     if len(parts) > 1 and merged:
         progress("finishing")
-        merged = await synthesize(merged, language, call=call, budget=window_chars)
-    return merged, failed, total, last_error
+
+        async def any_provider(prompt: str) -> str:
+            last: Exception | None = None
+            for name, call, _size in calls:
+                if name in resting:
+                    continue
+                try:
+                    return await call(prompt)
+                except (GeminiError, groq.GroqError) as exc:
+                    last = exc
+            raise last or GeminiError("No provider left for the synthesis")
+
+        merged = await synthesize(merged, language, call=any_provider, budget=window_chars)
+    # Counted at the end: halving and the second try both change the number.
+    return merged, len(skipped), len(parts) + len(skipped), state["last_error"]
 
 
 async def synthesize(merged: dict, language: str, *, call, budget: int) -> dict:
@@ -919,9 +978,9 @@ async def summarize(
     window sees the pages it is about, and the notes cite them as [p. N].
     `report` hears how far along it is; see summarize_in_windows.
 
-    Both providers summarize in windows and merge, so the detail does not thin
-    out in the middle of a long recording. Gemini is primary; Groq is tried
-    when every Gemini model has failed, since a quota error takes all of them
+    The transcript is summarized in windows and merged, so the detail does not
+    thin out in the middle of a long recording. Gemini is primary; Groq takes
+    any window Gemini cannot do, since a quota error takes every Gemini model
     out at once. Local extraction remains the last resort, and says so.
     """
     language = languages.normalize(language)
@@ -949,50 +1008,33 @@ async def summarize(
             json_output=True,
         )
 
-    providers = [("gemini", with_gemini, settings.GEMINI_WINDOW_CHARS)]
+    calls = [("gemini", with_gemini, settings.GEMINI_WINDOW_CHARS)]
     if settings.groq_configured:
-        providers.append(("groq", with_groq, settings.GROQ_WINDOW_CHARS))
+        calls.append(("groq", with_groq, settings.GROQ_WINDOW_CHARS))
 
-    last_error: Exception | None = None
-    best: dict = {}
-    best_failed = 0
+    merged, failed, total, last_error = await summarize_in_windows(
+        transcript,
+        language,
+        calls=calls,
+        # Gemini's size, as the provider that normally answers. A window that
+        # falls to Groq is cut to Groq's smaller size first.
+        window_chars=settings.GEMINI_WINDOW_CHARS,
+        min_window_chars=settings.MIN_WINDOW_CHARS,
+        slides=slides,
+        report=report,
+    )
 
-    for name, call, window_chars in providers:
-        try:
-            merged, failed, total, window_error = await summarize_in_windows(
-                transcript,
-                language,
-                call=call,
-                window_chars=window_chars,
-                min_window_chars=settings.MIN_WINDOW_CHARS,
-                slides=slides,
-                report=report,
-            )
-        except (GeminiError, groq.GroqError) as exc:
-            last_error = exc
-            logger.warning("%s could not summarize: %s", name, exc)
-            continue
+    if merged and not failed:
+        merged["degraded"] = False
+        return cite_pages(merged, slides or [])
 
-        # Kept even though the loop swallows per-window failures: without it
-        # a provider that failed on every window would look merely empty,
-        # and the notes would say "unavailable" for what was really a quota.
-        last_error = window_error or last_error
-
-        if merged and not failed:
-            merged["degraded"] = False
-            return cite_pages(merged, slides or [])
-
-        if merged and len(merged.get("sections", {})) > len(best.get("sections", {})):
-            best, best_failed = merged, failed
-        if failed:
-            logger.warning("%s summarized %d of %d windows", name, total - failed, total)
-
-    if best:
+    if merged:
         # Gaps, but real notes. Far better than the local extraction, and
         # flagged so nobody mistakes them for complete.
-        best["degraded"] = True
-        best["degraded_reason"] = "partial"
-        return cite_pages(best, slides or [])
+        logger.warning("Summarized %d of %d windows", total - failed, total)
+        merged["degraded"] = True
+        merged["degraded_reason"] = "partial"
+        return cite_pages(merged, slides or [])
 
     logger.error("Every provider failed, using local extraction: %s", last_error)
     result = fallback_summary(transcript, language)

@@ -111,6 +111,9 @@ class Settings:
     # How much of the notes so far each window is shown, so it adds to them
     # rather than repeating them. Also capped at a quarter of the window.
     NOTES_CARRY_CHARS: int = _int("NOTES_CARRY_CHARS", 4_000)
+    # Windows every provider refused for quota get one more try after this pause:
+    # rate limits are mostly per minute.
+    WINDOW_RETRY_PAUSE: int = _int("WINDOW_RETRY_PAUSE", 60)
 
     # ── Slides ────────────────────────────────────────────────────────────
     # A deck's text arrives with the transcript (extracted in the browser, so

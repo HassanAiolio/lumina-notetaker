@@ -70,6 +70,8 @@ const decodeErrorMessage = (err) => {
  */
 export const summaryLabel = (progress) => {
   if (progress?.stage === 'finishing') return 'Writing the overview…';
+  // Parts the AI skipped for a rate limit get another try after a pause.
+  if (progress?.stage === 'retrying') return 'The AI hit its limit. Retrying the skipped parts in a minute…';
   if (progress?.stage === 'writing' && progress.total > 1) {
     return `Structuring your notes… part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`;
   }

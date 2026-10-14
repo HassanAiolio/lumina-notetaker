@@ -151,10 +151,18 @@ audio and transcript ceilings, and an email allow-list.
 
 ### Two providers
 
-Gemini is primary; **Groq is tried when every Gemini model has failed**, and only then. That
+Gemini is primary; **Groq is tried for any window every Gemini model has failed on**. That
 matters because a Gemini quota error takes out all Gemini models at once — the fallback chain
-within one provider is no help — so the honest next step is somewhere else entirely. Local
-extraction stays as the last resort, but it produces visibly worse notes and says so in the UI.
+within one provider is no help — so the honest next step is somewhere else entirely. It is
+decided window by window: when Gemini runs out halfway through a lecture, Groq writes the rest
+and the parts join up in order. A provider that reports a rate limit is rested for the rest of
+the pass, and windows every provider refused get one more try after `WINDOW_RETRY_PAUSE`
+seconds (60 by default), since most limits are per minute. Only a window that fails again is
+left out, and the notes say a stretch is missing. Local extraction stays as the last resort,
+but it produces visibly worse notes and says so in the UI.
+
+`GROQ_API_KEY_BACKUP` is used when `GROQ_API_KEY` is rate limited. Groq counts limits per
+account, so it only helps if it comes from a different Groq account.
 
 Groq covers both jobs: chat models for the notes, and Whisper for speech, which also gives the
 transcription path a way out when Gemini's audio quota runs dry. Set `GROQ_API_KEY` (free from
