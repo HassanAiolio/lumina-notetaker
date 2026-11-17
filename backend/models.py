@@ -1,7 +1,7 @@
 """Request and response schemas."""
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from config import settings
 
@@ -84,6 +84,54 @@ class SummarizeRequest(BaseModel):
                 f"the limit is {settings.MAX_TRANSCRIPT_CHARS}"
             )
         return value
+
+
+class NoteJobCreate(BaseModel):
+    """A recording (or a typed transcript) handed to the server to finish and save.
+
+    `transcript` is what the app already has. With `audio`, chunks of the rest
+    follow, then a seal; without, the notes are written from the transcript.
+    """
+    transcript: str = ""
+    language: str = "auto"
+    # What the live transcription heard, so the server's chunks agree with it.
+    detected: str = Field("", max_length=10)
+    # The end of the transcript so far, for consistent spelling across chunks.
+    context: str = Field("", max_length=4000)
+    slides: list[SlidePage] = []
+    deck: SlideDeck | None = None
+    # Regenerating: the note to rewrite rather than adding a new one.
+    note_id: str | None = Field(None, max_length=64)
+    audio: bool = False
+    duration: float | None = Field(None, ge=0, le=6 * 3600)
+    source: str = Field("voice", pattern="^(voice|text)$")
+
+    @field_validator("slides")
+    @classmethod
+    def limit_slides(cls, value: list[SlidePage]) -> list[SlidePage]:
+        return [page for page in value if page.text][: settings.MAX_SLIDE_PAGES]
+
+    @field_validator("transcript")
+    @classmethod
+    def limit_transcript(cls, value: str) -> str:
+        value = (value or "").strip()
+        if len(value) > settings.MAX_TRANSCRIPT_CHARS:
+            raise ValueError(
+                f"Transcript is too long ({len(value)} characters); "
+                f"the limit is {settings.MAX_TRANSCRIPT_CHARS}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def something_to_work_on(self):
+        if not self.audio and not self.transcript:
+            raise ValueError("Transcript cannot be empty")
+        return self
+
+
+class NoteJobSeal(BaseModel):
+    """How many chunks were sent, so a missing one is noticed rather than skipped."""
+    chunks: int = Field(ge=0, le=10_000)
 
 
 class SummarizeResponse(BaseModel):

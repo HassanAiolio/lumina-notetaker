@@ -63,6 +63,15 @@ async def ensure_indexes() -> None:
         await db.window_notes.create_index(
             [("created_at", 1)], name="window_ttl", expireAfterSeconds=settings.WINDOW_CACHE_TTL
         )
+        # Recordings finished on the server (pipeline.py). A finished job is
+        # given an expires_at; one still running has none and is never dropped.
+        await db.note_jobs.create_index([("id", 1)], name="job_id", unique=True)
+        await db.note_jobs.create_index([("user_id", 1), ("created_at", -1)], name="user_jobs")
+        await db.note_jobs.create_index([("status", 1)], name="job_status")
+        await db.note_jobs.create_index([("expires_at", 1)], name="job_ttl", expireAfterSeconds=0)
+        await db.job_audio.create_index([("job_id", 1), ("index", 1)], name="job_chunk", unique=True)
+        # Chunks are deleted as they are transcribed; this catches any left behind.
+        await db.job_audio.create_index([("created_at", 1)], name="job_audio_ttl", expireAfterSeconds=3 * 24 * 3600)
         logger.info("MongoDB indexes ensured")
     except Exception as exc:  # noqa: BLE001 - a missing index must not block boot
         logger.error("Could not ensure indexes: %s", exc)

@@ -5,9 +5,10 @@
  * Discard or simply starting the next recording lost it for good - and with it
  * any lecture that could not be given again. Now every second of audio is
  * written here as it is captured, together with the text transcribed from it
- * and how far transcription got. Nothing here is ever uploaded: a recording
- * can be transcribed again, or picked up where it stopped, without the
- * network seeing anything twice.
+ * and how far transcription got. A recording can be transcribed again, or
+ * picked up where it stopped, without the network seeing anything twice. The
+ * only audio that leaves the device after Stop is the part live transcription
+ * had not reached (lib/handoff.js); `jobId` says which server job it went to.
  *
  * Audio is stored in pieces - whatever the recorder handed over since the last
  * write - keyed by recording, segment and piece. A segment's pieces joined in
@@ -124,6 +125,21 @@ export const deleteRecording = async (id) => {
     const tx = db.transaction([RECORDINGS, PIECES], 'readwrite');
     tx.objectStore(RECORDINGS).delete(id);
     tx.objectStore(PIECES).delete(piecesOf(id));
+    await done(tx);
+  } catch (err) {
+    /* nothing more to do */
+  }
+};
+
+/** Merge `fields` into a stored recording's description, if it is still kept. */
+export const updateRecording = async (id, fields) => {
+  try {
+    const db = await openDb();
+    if (!db) return;
+    const tx = db.transaction(RECORDINGS, 'readwrite');
+    const store = tx.objectStore(RECORDINGS);
+    const meta = await request(store.get(id));
+    if (meta) store.put({ ...meta, ...fields, updatedAt: Date.now() });
     await done(tx);
   } catch (err) {
     /* nothing more to do */

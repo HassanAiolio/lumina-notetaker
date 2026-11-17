@@ -9,6 +9,7 @@ const when = (time) =>
 const status = (meta) => {
   if (meta.discarded) return 'Discarded';
   if (meta.complete) return 'Transcribed';
+  if (meta.jobId) return 'Sent to the server';
   if (meta.text) return 'Partly transcribed';
   return 'Not transcribed';
 };
@@ -42,8 +43,9 @@ export const DeviceRecordings = ({ recordings, onRestoreText, onContinue, onSave
       {open && (
         <>
           <p className="text-[11px] text-zinc-400 leading-relaxed">
-            Your last {KEEP_RECORDINGS} recordings and their transcripts, saved in this browser only and
-            never uploaded. Each is kept for {KEEP_DAYS} days, or until signing out.
+            Your last {KEEP_RECORDINGS} recordings and their transcripts, kept in this browser. Only the
+            part not transcribed during a recording is sent to the server, which deletes it once it is
+            text. Each is kept for {KEEP_DAYS} days, or until signing out.
           </p>
           <ul className="space-y-2">
             {recordings.map((meta) => {

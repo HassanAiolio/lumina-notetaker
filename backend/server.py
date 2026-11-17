@@ -9,6 +9,7 @@ from pathlib import Path
 # Make the sibling modules importable under both start commands above.
 sys.path.insert(0, str(Path(__file__).parent))
 
+import asyncio  # noqa: E402
 import logging  # noqa: E402
 import re  # noqa: E402
 import uuid  # noqa: E402
@@ -24,6 +25,7 @@ import db  # noqa: E402
 import gemini  # noqa: E402
 import jobs  # noqa: E402
 import languages  # noqa: E402
+import pipeline  # noqa: E402
 import ratelimit  # noqa: E402
 import summarizer  # noqa: E402
 import transcription  # noqa: E402
@@ -46,6 +48,8 @@ from models import (  # noqa: E402
     AuthResponse,
     GoogleAuthRequest,
     NoteCreate,
+    NoteJobCreate,
+    NoteJobSeal,
     NoteResponse,
     NotesPage,
     NoteUpdate,
@@ -81,12 +85,18 @@ async def lifespan(_: FastAPI):
             "will sign everyone out. Set JWT_SECRET in production."
         )
 
+    sweeper = None
     if settings.MONGO_URL:
         await db.ensure_indexes()
         await db.adopt_legacy_notes(settings.LEGACY_OWNER_EMAIL)
+        # Picks up recordings a restart interrupted, and keeps the instance
+        # awake while any are unfinished.
+        sweeper = asyncio.create_task(pipeline.maintain())
 
     yield
 
+    if sweeper:
+        sweeper.cancel()
     await gemini.close_http_client()
     await db.close()
 
@@ -333,6 +343,104 @@ async def get_summary_job(job_id: str, user: User = Depends(current_user)):
             detail="Those notes are no longer being written. The server may have restarted: try again.",
         )
     return job.public()
+
+
+# ── Recordings finished on the server, notes saved there ──────────────────────
+# Registered before /notes/{note_id}, which would otherwise take "jobs" for an id.
+
+async def _own_job(job_id: str, user: User) -> dict:
+    job = await pipeline.get(job_id, user.id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="That recording is not on the server.")
+    return job
+
+
+@api.post("/notes/jobs", status_code=status.HTTP_202_ACCEPTED)
+async def start_note_job(req: NoteJobCreate, user: User = Depends(current_user)):
+    """Hand a recording over: the server finishes it, writes the notes and saves them.
+
+    With `audio`, PUT the chunks the app had not transcribed yet, then seal.
+    Without, the notes are written from `transcript` straight away. Either
+    way the tab may close afterwards: the note is saved when it is done.
+    """
+    ratelimit.check(f"ai:{user.id}", *settings.RATE_LIMIT_AI)
+    if await pipeline.active_count(user.id) >= settings.NOTE_JOB_MAX_ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Several recordings are already being finished for you. Wait for one of them first.",
+        )
+    if req.note_id:
+        await _own_note(req.note_id, user)
+    job = await pipeline.create(user.id, req)
+    return pipeline.public(job)
+
+
+@api.put("/notes/jobs/{job_id}/audio/{index}", status_code=status.HTTP_204_NO_CONTENT)
+async def put_note_job_audio(
+    request: Request,
+    job_id: str,
+    index: int = PathParam(ge=0, le=10_000),
+    user: User = Depends(current_user),
+):
+    """One chunk of the audio still to transcribe, as the raw body, in order from 0."""
+    ratelimit.check(f"write:{user.id}", *settings.RATE_LIMIT_WRITE)
+    job = await _own_job(job_id, user)
+    try:
+        transcription.normalize_mime(request.headers.get("content-type"))
+    except transcription.AudioError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    declared = int(request.headers.get("content-length") or 0)
+    if declared > settings.NOTE_JOB_MAX_CHUNK_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="That chunk of audio is too large")
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty audio upload")
+    if len(data) > settings.NOTE_JOB_MAX_CHUNK_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="That chunk of audio is too large")
+    try:
+        # Kept as sent: transcription maps it onto what the providers accept.
+        await pipeline.add_chunk(job, index, data, request.headers["content-type"].split(";")[0].strip().lower())
+    except pipeline.JobError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@api.post("/notes/jobs/{job_id}/seal")
+async def seal_note_job(job_id: str, req: NoteJobSeal, user: User = Depends(current_user)):
+    """All the audio is up. From here the server needs nothing more from the app."""
+    job = await _own_job(job_id, user)
+    try:
+        job = await pipeline.seal(job, req.chunks)
+    except pipeline.JobError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return pipeline.public(job)
+
+
+@api.get("/notes/jobs")
+async def list_note_jobs(user: User = Depends(current_user)):
+    """Recordings still being finished, and finished ones not yet looked at."""
+    return [pipeline.public(job) for job in await pipeline.recent(user.id)]
+
+
+@api.get("/notes/jobs/{job_id}")
+async def get_note_job(job_id: str, transcript: bool = Query(False), user: User = Depends(current_user)):
+    """How far it has got. `transcript` adds the text so far, to take back if it failed."""
+    return pipeline.public(await _own_job(job_id, user), with_transcript=transcript)
+
+
+@api.post("/notes/jobs/{job_id}/cancel")
+async def cancel_note_job(job_id: str, user: User = Depends(current_user)):
+    job = await _own_job(job_id, user)
+    if job["status"] in pipeline.ACTIVE:
+        job = await pipeline.cancel(job)
+    return pipeline.public(job)
+
+
+@api.post("/notes/jobs/{job_id}/seen", status_code=status.HTTP_204_NO_CONTENT)
+async def see_note_job(job_id: str, user: User = Depends(current_user)):
+    """The app has shown what became of it; stop listing it."""
+    await pipeline.mark_seen(await _own_job(job_id, user))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ── Notes (scoped to the signed-in user) ──────────────────────────────────────

@@ -248,6 +248,35 @@ export const summarizeTranscript = async (
   return job.result;
 };
 
+// ── Recordings finished on the server ────────────────────────────────────────
+// Stop hands a recording to the backend (lib/handoff.js): the text so far, then
+// the audio not yet transcribed, then a seal. The server transcribes the rest,
+// writes the notes and saves the note itself, so the tab can close.
+
+export const startNoteJob = async (body) => (await client.post('/notes/jobs', body)).data;
+
+/** One chunk of audio, in order from 0. Sending the same index again is harmless. */
+export const uploadJobAudio = async (jobId, index, blob, { signal } = {}) =>
+  client.put(`/notes/jobs/${encodeURIComponent(jobId)}/audio/${index}`, blob, {
+    headers: { 'Content-Type': blob.type || 'audio/mpeg' },
+    signal,
+  });
+
+export const sealNoteJob = async (jobId, chunks) =>
+  (await client.post(`/notes/jobs/${encodeURIComponent(jobId)}/seal`, { chunks })).data;
+
+/** `transcript` adds the text so far: worth having back when a job failed. */
+export const getNoteJob = async (jobId, { transcript = false } = {}) =>
+  (await client.get(`/notes/jobs/${encodeURIComponent(jobId)}`, { params: transcript ? { transcript: true } : {} })).data;
+
+/** Jobs still going, and finished ones the app has not shown yet. */
+export const listNoteJobs = async () => (await client.get('/notes/jobs')).data;
+
+export const cancelNoteJob = async (jobId) =>
+  (await client.post(`/notes/jobs/${encodeURIComponent(jobId)}/cancel`)).data;
+
+export const markNoteJobSeen = async (jobId) => client.post(`/notes/jobs/${encodeURIComponent(jobId)}/seen`);
+
 /** Keep the picture of one cited slide page with a saved note. */
 export const putSlidePage = async (noteId, page, blob) =>
   client.put(`/notes/${noteId}/slides/${page}`, blob, {

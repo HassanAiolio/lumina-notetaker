@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import db as db_module  # noqa: E402
 import jobs  # noqa: E402
+import pipeline  # noqa: E402
 import ratelimit  # noqa: E402
 import server  # noqa: E402
 from auth import User, current_user, hash_api_token, reading_user  # noqa: E402
@@ -163,6 +164,8 @@ class FakeDatabase:
         self.slide_pages = FakeCollection()
         self.api_tokens = FakeCollection()
         self.window_notes = FakeCollection()
+        self.note_jobs = FakeCollection()
+        self.job_audio = FakeCollection()
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -178,6 +181,7 @@ def fake_db(monkeypatch):
     monkeypatch.setattr(server.db, "get_db", lambda: database)
     ratelimit.reset()
     jobs.reset()
+    pipeline.reset()
     return database
 
 

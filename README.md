@@ -374,6 +374,7 @@ backend/
 ├── gemini.py          # retries, model fallback, JSON recovery
 ├── transcription.py   # audio validation, chunking, speech-to-text
 ├── summarizer.py      # prompting, normalization, offline fallback
+├── pipeline.py        # recordings finished and notes saved on the server, after Stop
 ├── languages.py       # supported languages + offline detector
 ├── ratelimit.py       # per-user sliding window
 ├── models.py          # request/response schemas
@@ -387,6 +388,7 @@ frontend/src/
 │   └── useSpeechRecognition.js  # live captions (best-effort)
 ├── lib/
 │   ├── audio.js                 # decode, resample, WAV, chunking
+│   ├── handoff.js               # hands the rest of a recording to the server at Stop
 │   ├── notes.js                 # section shapes, labels, Markdown
 │   ├── obsidian.js              # notes as Obsidian Markdown, file names, tags
 │   ├── obsidianExport.js        # one note or the library, with slide pages
@@ -434,6 +436,76 @@ Between them these replace a pipeline whose peak was roughly 1.2 GB for a one-ho
 enough that an hour-long meeting failed outright, reported as a browser that could not decode
 the audio.
 
+### Finished on the server
+
+Live transcription does most of a lecture while it is being given, so at Stop only the last
+few minutes are left. Those used to be done in the browser, followed by the notes, which then
+waited for someone to press Generate and were saved by the tab — so closing it lost the rest.
+
+Now Stop hands the recording to the backend (`backend/pipeline.py`, `frontend/src/lib/handoff.js`):
+
+1. The live run carries on, but each chunk it cuts from here is **uploaded** instead of
+   transcribed — nothing is decoded twice. The job is created at the first upload, with the
+   transcript as it stands then, so a chunk mid-transcription at Stop is in it.
+2. Once the upload is sealed the tab can close. The server transcribes the uploaded chunks in
+   order, writes the notes and **saves the note itself**. A chunk every provider refuses is
+   retried with growing pauses for up to `NOTE_JOB_AUDIO_RETRY_FOR` (3 h), then left out as
+   `[...]` and the note flagged.
+3. Next time the app opens it shows what finished meanwhile, and follows anything still going.
+
+Jobs live in MongoDB (`note_jobs`, and `job_audio` for the chunks, deleted as each is
+transcribed), so a restart resumes them, and the note's id is fixed when the job is made, so a
+rerun never saves it twice. An upload that stops half-way (the tab closed too early) is picked
+up from the copy kept on the device on reload, or finished with what arrived after
+`NOTE_JOB_RECEIVE_TIMEOUT`. While any job is unfinished the server pings its own
+`/api/health` every few minutes (`RENDER_EXTERNAL_URL`, or `KEEPALIVE_URL`), because a free
+Render instance otherwise sleeps after 15 minutes without requests — and used to rely on the
+tab's polling to stay awake.
+
+Generate notes (typed text, or redoing a note) runs the same way, without the audio.
+
+Bandwidth: this is the one place audio goes through Render again, but only the tail —
+typically one or two 4-minute MP3 chunks, ~3 MB each. The Worker still carries everything
+transcribed live.
+
+**Deploy the backend before the frontend.** The new app needs `/api/notes/jobs`; against an
+older backend, Generate notes falls back to the old in-browser path, but Stop cannot hand over.
+
+### Finished on the server
+
+Live transcription does most of a lecture while it is being given, so at Stop only the last
+few minutes are left. Those used to be done in the browser, followed by the notes, which then
+waited for someone to press Generate and were saved by the tab — so closing it lost the rest.
+
+Now Stop hands the recording to the backend (`backend/pipeline.py`, `frontend/src/lib/handoff.js`):
+
+1. The live run carries on, but each chunk it cuts from here is **uploaded** instead of
+   transcribed — nothing is decoded twice. The job is created at the first upload, with the
+   transcript as it stands then, so a chunk mid-transcription at Stop is in it.
+2. Once the upload is sealed the tab can close. The server transcribes the uploaded chunks in
+   order, writes the notes and **saves the note itself**. A chunk every provider refuses is
+   retried with growing pauses for up to `NOTE_JOB_AUDIO_RETRY_FOR` (3 h), then left out as
+   `[...]` and the note flagged.
+3. Next time the app opens it shows what finished meanwhile, and follows anything still going.
+
+Jobs live in MongoDB (`note_jobs`, and `job_audio` for the chunks, deleted as each is
+transcribed), so a restart resumes them, and the note's id is fixed when the job is made, so a
+rerun never saves it twice. An upload that stops half-way (the tab closed too early) is picked
+up from the copy kept on the device on reload, or finished with what arrived after
+`NOTE_JOB_RECEIVE_TIMEOUT`. While any job is unfinished the server pings its own
+`/api/health` every few minutes (`RENDER_EXTERNAL_URL`, or `KEEPALIVE_URL`), because a free
+Render instance otherwise sleeps after 15 minutes without requests — and used to rely on the
+tab's polling to stay awake.
+
+Generate notes (typed text, or redoing a note) runs the same way, without the audio.
+
+Bandwidth: this is the one place audio goes through Render again, but only the tail —
+typically one or two 4-minute MP3 chunks, ~3 MB each. The Worker still carries everything
+transcribed live.
+
+**Deploy the backend before the frontend.** The new app needs `/api/notes/jobs`; against an
+older backend, Generate notes falls back to the old in-browser path, but Stop cannot hand over.
+
 ### Transcribing a file you already have
 
 The app only transcribes what it records, so `backend/retranscribe.py` is the way in for a
@@ -470,6 +542,11 @@ vocabulary (rare words weigh more). The slides supply exact terms, notation and
 the formulas that were on the board, which the audio never contained; a bullet
 that draws on one ends with `[p. 12]`, invented page numbers are dropped, and
 the chip opens the page.
+
+The PDF is kept on the device (IndexedDB, `lib/deckStore.js`), so the slides are still
+attached after a reload, and each recording kept on the device remembers its deck: finishing
+it later uses the same slides. When the server finishes a note while the tab is closed, the
+cited pages are drawn from that kept copy the next time the app opens.
 
 When the note is saved, pictures of the cited pages only are kept with it (a
 separate `slide_pages` collection, never sent with a listing), so the reader can

@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useStat
 import { AnimatePresence, motion } from 'framer-motion';
 import { BookOpen, Loader2, Volume2, WifiOff } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
-import { Recorder } from './components/Recorder';
+import { Recorder, summaryLabel } from './components/Recorder';
 import { NoteOutput } from './components/NoteOutput';
 import { NoteHistory } from './components/NoteHistory';
 import { SignIn } from './components/SignIn';
@@ -10,9 +10,29 @@ import { UserMenu } from './components/UserMenu';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useAuth } from './contexts/AuthContext';
 import { SlidesProvider } from './components/Slides';
-import { errorMessage, putSlidePage, saveNote, summarizeTranscript, updateNote } from './services/api';
+import {
+  cancelNoteJob,
+  errorMessage,
+  getNote,
+  getNoteJob,
+  listNoteJobs,
+  markNoteJobSeen,
+  putSlidePage,
+  saveNote,
+  startNoteJob,
+  summarizeTranscript,
+  updateNote,
+} from './services/api';
 import { citedPages } from './lib/notes';
+import { listRecordings, updateRecording } from './lib/recordingStore';
+import { currentDeck, forgetCurrentDeck, loadDeckFile, rememberCurrentDeck, saveDeck } from './lib/deckStore';
+import { openDeck } from './lib/slides';
 import './App.css';
+
+// A server job that is still going (backend pipeline.py). It goes on whether
+// or not this tab stays open; the app only follows it.
+const ACTIVE_JOB = ['receiving', 'running'];
+const JOB_POLL_MS = 3000;
 
 const Scene3D = lazy(() =>
   import('./components/Canvas3D/Scene3D').then((module) => ({ default: module.Scene3D })),
@@ -44,7 +64,7 @@ const writeStored = (key, value) => {
 };
 
 function Workspace() {
-  const { config } = useAuth();
+  const { config, user } = useAuth();
 
   // The draft survives a reload or an accidental close — losing a transcript
   // you cannot re-record is the worst thing this app could do to someone.
@@ -53,9 +73,18 @@ function Workspace() {
   // What the transcriber actually heard, used to keep the summary in that same
   // language without overriding the user's own "auto" choice.
   const [detectedLanguage, setDetectedLanguage] = useState('');
-  const [isSummarizing, setIsSummarizing] = useState(false);
-  // How far the server has got with a long transcript: {stage, done, total}.
-  const [summaryProgress, setSummaryProgress] = useState(null);
+  // The job the server is finishing for this tab, as last heard: a recording
+  // handed over at Stop, or a transcript sent with Generate notes. The note is
+  // saved by the server when it is done, open tab or not.
+  const [serverJob, setServerJob] = useState(null);
+  const [startingJob, setStartingJob] = useState(false);
+  // Notes written by the browser-held job, for a backend without server jobs.
+  const [summarizingHere, setSummarizingHere] = useState(false);
+  const [localProgress, setLocalProgress] = useState(null);
+  const jobActive = !!serverJob && ACTIVE_JOB.includes(serverJob.status);
+  const isSummarizing = startingJob || jobActive || summarizingHere;
+  // How far the server has got: {stage, done, total}.
+  const summaryProgress = serverJob?.progress || localProgress;
   const [isSaving, setIsSaving] = useState(false);
   const [savedCurrent, setSavedCurrent] = useState(false);
   const [currentNote, setCurrentNote] = useState(null);
@@ -71,8 +100,65 @@ function Workspace() {
     window.location.hash.startsWith('#note=') ? 'history' : 'record',
   );
   const [isOnline, setIsOnline] = useState(() => navigator.onLine !== false);
-  // The lecture's slides (PDF), read in the browser, for this session.
-  const [deck, setDeck] = useState(null);
+  // The lecture's slides (PDF), read in the browser. Kept on the device
+  // (lib/deckStore), so they are still attached after a reload, and the pages
+  // a note cites can be drawn whenever that note is ready.
+  const [deck, setDeckState] = useState(null);
+  const deckRef = useRef(null);
+  const setDeck = useCallback(
+    (next) => {
+      deckRef.current = next;
+      setDeckState(next);
+      if (next) {
+        saveDeck(next, user?.id);
+        rememberCurrentDeck(next.hash, user?.id);
+      } else {
+        forgetCurrentDeck();
+      }
+    },
+    [user],
+  );
+
+  // The slides attached before a reload are attached again.
+  useEffect(() => {
+    const hash = currentDeck(user?.id);
+    if (!hash) return undefined;
+    let cancelled = false;
+    (async () => {
+      const file = await loadDeckFile(hash);
+      if (!file || cancelled || deckRef.current) return;
+      try {
+        const opened = await openDeck(file);
+        if (cancelled || deckRef.current) {
+          opened.close?.();
+          return;
+        }
+        deckRef.current = opened;
+        setDeckState(opened);
+      } catch (err) {
+        forgetCurrentDeck();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  /**
+   * The deck a note was made with: the one attached, if it is that one, or
+   * the copy kept on this device, opened for the purpose (`temporary`).
+   */
+  const deckFor = useCallback(async (slides) => {
+    if (!slides?.hash) return null;
+    if (deckRef.current?.hash === slides.hash) return { deck: deckRef.current, temporary: false };
+    const file = await loadDeckFile(slides.hash);
+    if (!file) return null;
+    try {
+      return { deck: await openDeck(file), temporary: true };
+    } catch (err) {
+      return null;
+    }
+  }, []);
 
   const airplaneTimerRef = useRef(null);
   const noteRef = useRef(null);
@@ -97,14 +183,19 @@ function Workspace() {
 
   useEffect(() => writeStored(LANGUAGE_KEY, language), [language]);
 
+  // Read by work that finishes long after the render that started it.
+  const transcriptRef = useRef(transcript);
   const setTranscript = useCallback((value) => {
+    transcriptRef.current = value;
     setTranscriptState(value);
     writeStored(DRAFT_KEY, value);
   }, []);
 
-  // Warn before losing an unsaved transcript.
+  // Warn before losing an unsaved transcript, or a recording still being
+  // recorded or sent. Not while the server is finishing it: that carries on
+  // without the tab, and saves the note itself.
   useEffect(() => {
-    const hasUnsaved = transcript.trim().length > 0 && !savedCurrent;
+    const hasUnsaved = sessionActive || (transcript.trim().length > 0 && !savedCurrent && !jobActive);
     if (!hasUnsaved) return undefined;
     const onBeforeUnload = (event) => {
       event.preventDefault();
@@ -112,7 +203,7 @@ function Workspace() {
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [transcript, savedCurrent]);
+  }, [transcript, savedCurrent, sessionActive, jobActive]);
 
   /** Pictures of the cited slide pages, kept with the note so it can show them anywhere. */
   const keepSlides = useCallback(async (saved, source) => {
@@ -150,22 +241,158 @@ function Workspace() {
     [deck, keepSlides],
   );
 
-  // Only ever started by the user: a finished transcription waits here so
-  // slides can be added and mistakes fixed before notes are made from it.
-  const handleSummarize = useCallback(async () => {
-    const text = transcript.trim();
-    if (!text) {
-      toast.error('There is nothing to summarize yet.');
-      return;
+  /** Notes ready to look at: the airplane, and the note brought into view. */
+  const celebrate = useCallback((degraded) => {
+    if (degraded) {
+      toast.warning('Your notes are saved, but the AI could not do all of them.', {
+        description: 'Generate notes again later to fill in what is missing.',
+      });
+    } else {
+      toast.success('Your notes are ready', { description: 'Saved to your notes.' });
+      setAirplaneFlying(true);
+      airplaneTimerRef.current = setTimeout(() => setAirplaneFlying(false), 3000);
     }
+    // Bring the result into view rather than leaving it below the fold.
+    setTimeout(() => noteRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120);
+  }, []);
 
-    setIsSummarizing(true);
+  const openSaved = useCallback((id) => {
+    window.location.hash = `#note=${encodeURIComponent(id)}`;
+    setActiveTab('history');
+  }, []);
+
+  /**
+   * A server job has finished, whether or not this tab saw it start. Its note
+   * is already saved; this only shows it - in place, when the transcript on
+   * screen is the one it was made from, and as a link otherwise, so a draft
+   * typed since is never replaced.
+   */
+  const settleJob = useCallback(
+    async (job) => {
+      try {
+        if (job.status === 'done' && job.note_id) {
+          const note = await getNote(job.note_id);
+          const onScreen = transcriptRef.current.trim();
+          if (!onScreen || (note.raw_transcript || '').startsWith(onScreen.slice(0, 2000))) {
+            setCurrentNote({ ...note, degraded_reason: job.degraded_reason });
+            setSavedCurrent(true);
+            setTranscript(note.raw_transcript || '');
+            celebrate(job.degraded);
+          } else {
+            toast.success(`Notes saved: ${note.title}`, {
+              action: { label: 'Open', onClick: () => openSaved(note.id) },
+            });
+          }
+          setRefreshTrigger((value) => value + 1);
+          // Pictures of the cited pages, drawn from the slides kept on this
+          // device - also for a note the server finished while the tab was shut.
+          if (note.slides?.cited?.length) {
+            const found = await deckFor(note.slides);
+            if (found) {
+              await keepSlides(note, found.deck);
+              if (found.temporary) found.deck.close?.();
+            }
+          }
+          // The copy kept on this device is fully transcribed now.
+          const kept = (await listRecordings(user?.id)).find((meta) => meta.jobId === job.id);
+          if (kept) updateRecording(kept.id, { complete: true, text: note.raw_transcript });
+        } else if (job.status === 'failed') {
+          toast.error(job.error || 'Your notes could not be finished.');
+          if (!transcriptRef.current.trim()) {
+            const full = await getNoteJob(job.id, { transcript: true });
+            if (full.transcript) setTranscript(full.transcript);
+          }
+        }
+      } catch (err) {
+        toast.error(errorMessage(err, 'Your notes could not be shown here. Look for them under Notes.'));
+      }
+      markNoteJobSeen(job.id).catch(() => {});
+    },
+    [celebrate, deckFor, keepSlides, openSaved, setTranscript, user],
+  );
+
+  /** What the server finished while this tab was closed, and what it is still doing. */
+  const refreshJobs = useCallback(async () => {
+    let jobs;
+    try {
+      jobs = await listNoteJobs();
+    } catch (err) {
+      return; // offline, or a backend from before server jobs
+    }
+    // Oldest first, so the newest is the one left on screen.
+    const finished = jobs.filter((job) => !ACTIVE_JOB.includes(job.status)).reverse();
+    for (const job of finished) {
+      // eslint-disable-next-line no-await-in-loop
+      await settleJob(job);
+    }
+    const active = jobs.find((job) => ACTIVE_JOB.includes(job.status));
+    if (active) setServerJob((current) => current || active);
+  }, [settleJob]);
+
+  const checkedJobsRef = useRef(false);
+  useEffect(() => {
+    if (checkedJobsRef.current) return;
+    checkedJobsRef.current = true;
+    refreshJobs();
+  }, [refreshJobs]);
+
+  // Follow the job until it finishes, then show it and look for the next.
+  const settledRef = useRef(new Set());
+  useEffect(() => {
+    if (!serverJob) return undefined;
+    if (!ACTIVE_JOB.includes(serverJob.status)) {
+      setServerJob(null);
+      if (!settledRef.current.has(serverJob.id)) {
+        settledRef.current.add(serverJob.id);
+        settleJob(serverJob).then(refreshJobs);
+      }
+      return undefined;
+    }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const next = await getNoteJob(serverJob.id);
+        if (!cancelled) setServerJob(next);
+      } catch (err) {
+        if (cancelled) return;
+        // Gone (it expired): stop. Anything else: ask again next round.
+        if (err?.response?.status === 404) setServerJob(null);
+        else setServerJob((job) => (job ? { ...job } : job));
+      }
+    }, JOB_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [serverJob, settleJob, refreshJobs]);
+
+  /** The Recorder sent the rest of a recording: the server takes it from here. */
+  const handleHandedOver = useCallback((job) => {
     setSavedCurrent(false);
+    setServerJob(job);
+    toast.success('Sent to the server', {
+      description: 'Your notes are being written and will be saved by themselves. You can close this tab.',
+    });
+  }, []);
+
+  const handleCancelJob = useCallback(async () => {
+    if (!serverJob) return;
+    try {
+      setServerJob(await cancelNoteJob(serverJob.id));
+      toast('Stopped. The transcript is kept.');
+    } catch (err) {
+      toast.error(errorMessage(err, 'Could not stop it.'));
+    }
+  }, [serverJob]);
+
+  /** The old way, for a backend without server jobs: written and saved by this tab. */
+  const summarizeHere = useCallback(async (text) => {
+    setSummarizingHere(true);
     try {
       const summaryLanguage = language === 'auto' ? detectedLanguage || 'auto' : language;
       const slidesText = deck ? deck.pages.filter((page) => page.text) : [];
       const result = await summarizeTranscript(text, summaryLanguage, slidesText, {
-        onProgress: setSummaryProgress,
+        onProgress: setLocalProgress,
       });
       const note = {
         // Regenerating rewrites the note already saved, keeping its tags.
@@ -189,30 +416,50 @@ function Workspace() {
       // closed tab, and making them again costs a scarce AI request.
       persistNote(note, { quiet: true });
 
-      if (result.degraded) {
-        toast.warning('The AI was unavailable — notes were structured locally.');
-      } else {
-        toast.success('Your notes are ready');
-        setAirplaneFlying(true);
-        airplaneTimerRef.current = setTimeout(() => setAirplaneFlying(false), 3000);
-      }
-
-      // Bring the result into view rather than leaving it below the fold.
-      setTimeout(() => noteRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120);
+      celebrate(result.degraded);
     } catch (err) {
       toast.error(errorMessage(err, 'Could not structure your notes.'));
     } finally {
-      setIsSummarizing(false);
-      setSummaryProgress(null);
+      setSummarizingHere(false);
+      setLocalProgress(null);
     }
-  }, [transcript, language, detectedLanguage, deck, currentNote, persistNote]);
+  }, [language, detectedLanguage, deck, currentNote, persistNote, celebrate]);
+
+  /**
+   * Notes from the transcript on screen - a typed one, or a corrected one to
+   * redo. Written and saved by the server, so this tab need not stay open.
+   */
+  const handleSummarize = useCallback(async () => {
+    const text = transcript.trim();
+    if (!text) {
+      toast.error('There is nothing to summarize yet.');
+      return;
+    }
+    setSavedCurrent(false);
+    setStartingJob(true);
+    try {
+      const job = await startNoteJob({
+        transcript: text,
+        language,
+        detected: detectedLanguage || '',
+        slides: deck ? deck.pages.filter((page) => page.text) : [],
+        deck: deck ? { name: deck.name, pages: deck.pageCount, hash: deck.hash } : null,
+        // Regenerating rewrites the note already saved, keeping its tags.
+        note_id: currentNote?.id || null,
+        source: currentNote?.source || 'voice',
+      });
+      setServerJob(job);
+    } catch (err) {
+      // No such route: a backend from before server jobs.
+      const missing = err?.response?.status === 405 || err?.response?.data?.detail === 'Not Found';
+      if (missing) await summarizeHere(text);
+      else toast.error(errorMessage(err, 'Could not start writing your notes.'));
+    } finally {
+      setStartingJob(false);
+    }
+  }, [transcript, language, detectedLanguage, deck, currentNote, summarizeHere]);
 
   const handleSave = useCallback((note) => persistNote(note), [persistNote]);
-
-  const openSaved = useCallback((id) => {
-    window.location.hash = `#note=${encodeURIComponent(id)}`;
-    setActiveTab('history');
-  }, []);
 
   // The transcript goes with the note only once the note is safely saved; a
   // note whose save failed would otherwise take its only source with it.
@@ -363,9 +610,34 @@ function Workspace() {
                       onRecordingChange={setIsRecording}
                       onTranscribingChange={setIsTranscribing}
                       onDetectedLanguage={setDetectedLanguage}
+                      onHandedOver={handleHandedOver}
                       audioLevelRef={audioLevelRef}
                     />
                   </motion.div>
+
+                  {jobActive && (
+                    <div
+                      className="glass-card p-4 flex items-start gap-3"
+                      role="status"
+                      data-testid="server-job-status"
+                    >
+                      <Loader2 size={16} className="animate-spin text-violet-400 mt-0.5 flex-shrink-0" />
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <p className="text-sm text-zinc-200">{summaryLabel(serverJob.progress)}</p>
+                        <p className="text-[11px] text-zinc-400 leading-relaxed">
+                          This is happening on the server. You can close this tab: the note is saved to
+                          your library when it is ready.
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleCancelJob}
+                        className="text-xs text-zinc-400 hover:text-white transition-colors duration-200 flex-shrink-0"
+                        data-testid="cancel-server-job"
+                      >
+                        Stop
+                      </button>
+                    </div>
+                  )}
 
                   <div ref={noteRef}>
                     <AnimatePresence>

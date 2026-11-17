@@ -21,6 +21,9 @@ import {
   toSingleWav,
 } from '../lib/audio';
 import { freshProgress, isCancel, transcribeSegments } from '../lib/transcription';
+import { handoffStore, serverRoute } from '../lib/handoff';
+import { loadDeckFile } from '../lib/deckStore';
+import { openDeck } from '../lib/slides';
 import {
   deleteRecording,
   keepRecording,
@@ -28,8 +31,7 @@ import {
   loadRecording,
   pruneRecordings,
 } from '../lib/recordingStore';
-import { errorMessage } from '../services/api';
-import { languageName } from '../lib/notes';
+import { cancelNoteJob, errorMessage, getNoteJob, transcribeChunk } from '../services/api';
 
 const LevelMeter = ({ levels, paused }) => (
   <div className="flex items-center justify-center gap-[3px] h-10" aria-hidden data-testid="level-meter">
@@ -69,6 +71,14 @@ const decodeErrorMessage = (err) => {
  * minutes of work, and "Structuring…" alone for that long looks stuck.
  */
 export const summaryLabel = (progress) => {
+  // The server's own stages, before the notes: see backend/pipeline.py.
+  if (progress?.stage === 'receiving') return 'Waiting for the rest of the recording…';
+  if (progress?.stage === 'transcribing') {
+    return progress.total > 1
+      ? `Transcribing the last part… ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`
+      : 'Transcribing the last part…';
+  }
+  if (progress?.stage === 'waiting') return 'Transcription hit a rate limit. Trying again shortly…';
   if (progress?.stage === 'finishing') return 'Writing the overview…';
   // Parts the AI skipped for a rate limit get another try after a pause.
   if (progress?.stage === 'retrying') return 'The AI hit its limit. Retrying the skipped parts in a minute…';
@@ -91,12 +101,13 @@ export const Recorder = ({
   onTranscribingChange,
   onDetectedLanguage,
   onSessionChange,
+  onHandedOver,
   deck,
   onDeck,
   audioLevelRef,
 }) => {
   const [mode, setMode] = useState('voice');
-  const [stage, setStage] = useState('idle'); // idle | transcribing
+  const [stage, setStage] = useState('idle'); // idle | uploading
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [pipelineError, setPipelineError] = useState('');
   // The live run gave up mid-recording; whatever is left is done after stop.
@@ -208,99 +219,189 @@ export const Recorder = ({
     [languages],
   );
 
-  /**
-   * A recording is fully transcribed: keep its audio and report. Notes are not
-   * made from it until the user asks, so there is time to add slides or fix
-   * the transcript first.
-   */
-  const finishRecording = useCallback(
-    (recording, progress) => {
-      recording.keep?.update({ progress, complete: !!progress.context });
-      recording.keep?.close().then(refreshStored);
-      // context only ever holds text a chunk returned, so empty means silence.
-      if (!progress.context) {
-        setPendingRecording({ ...recording, progress });
-        setPipelineError('No speech was detected in that recording.');
-        return;
-      }
-      // The audio stays until the next recording, so a transcript that came
-      // out wrong can still be saved and redone.
-      setPendingRecording({ ...recording, progress, complete: true });
-      if (progress.detected) onDetectedLanguage?.(progress.detected);
-      toast.success(
-        progress.detected
-          ? `Transcribed (${languageName(progress.detected) || progress.detected})`
-          : 'Transcribed',
-        { description: 'Review it, add slides if you have them, then Generate notes.' },
-      );
+  /** The server job's body, read when the job is made rather than at Stop (see lib/handoff.js). */
+  const jobRequest = useCallback(
+    (recording, current, slides) => () => {
+      const progress = current();
+      return {
+        transcript: transcriptRef.current.trim(),
+        language,
+        detected: progress.detected || '',
+        context: (progress.context || '').slice(-2000),
+        // The slides' text guides the notes, and they cite its pages.
+        slides: slides ? slides.pages.filter((page) => page.text) : [],
+        deck: slides ? { name: slides.name, pages: slides.pageCount, hash: slides.hash } : null,
+        duration: recording.seconds || null,
+        source: 'voice',
+      };
     },
-    [onDetectedLanguage, refreshStored],
+    [language],
   );
 
   /**
-   * A run stopped part-way. Every chunk it finished is already in the
-   * transcript, so the recording remembers where it got to and a retry only
-   * does the rest - transcribing from the top used to append the opening of
-   * the recording a second time.
+   * A hand-over stopped part-way. The recording is still on this device, and
+   * a retry sends the rest to the same job from where the upload stopped.
    */
-  const failRecording = useCallback((recording, err, fallbackProgress) => {
-    const progress = err?.progress || fallbackProgress;
-    recording.keep?.update({ progress });
-    recording.keep?.close().then(refreshStored);
-    setPendingRecording({ ...recording, progress });
-    if (isCancel(err)) {
-      setPipelineError('Transcription stopped. The text so far is kept; retry to do the rest.');
-    } else if (err instanceof AudioDecodeError) {
-      setPipelineError(decodeErrorMessage(err));
-    } else if (progress.done > 0) {
-      setPipelineError(
-        `${errorMessage(err, 'Transcription failed.')} The text so far is below, and retrying picks up where it stopped.`,
-      );
-    } else {
-      setPipelineError(errorMessage(err, 'Transcription failed.'));
-    }
-  }, [refreshStored]);
-
-  /** Transcribe a finished recording, from wherever an earlier run stopped. */
-  const runTranscription = useCallback(
-    async (recording) => {
-      const segments = recording?.segments || [];
-      if (!segments.length) {
-        setPipelineError('Nothing was recorded. Check that your microphone is working.');
+  const failHandOver = useCallback(
+    (recording, err, route, progress) => {
+      recording.keep?.close().then(refreshStored);
+      if (isCancel(err)) {
+        // Stopped on purpose: the server drops what it has, and the recording
+        // goes back to where transcription here had got to.
+        if (route.job) cancelNoteJob(route.job.id).catch(() => {});
+        handoffStore.clear();
+        const transcribed = recording.keep?.meta.progress || recording.progress;
+        setPendingRecording({ ...recording, route: null, progress: transcribed || undefined });
+        setPipelineError('Stopped before the rest of the recording reached the server. The text so far is kept; retry to send the rest.');
         return;
       }
-      // The chunk length is pinned with the progress, so the cut points line
-      // up with the earlier run even if the connection has changed since.
-      const start = recording.progress || freshProgress(chunkSecondsForConnection());
+      // No response at all is a connection that dropped: worth trying again
+      // by itself once it is back.
+      setPendingRecording({ ...recording, route, progress, retryOnline: !err?.response });
+      if (err instanceof AudioDecodeError) {
+        setPipelineError(decodeErrorMessage(err));
+      } else {
+        setPipelineError(
+          `${errorMessage(err, 'The rest of the recording could not be sent to the server.')} The recording is kept on this device; retry to send the rest.`,
+        );
+      }
+    },
+    [refreshStored],
+  );
+
+  /**
+   * Hand a stopped recording to the server, which transcribes what is left,
+   * writes the notes and saves them. Once this returns the tab can close.
+   *
+   * With the live run still healthy, it simply carries on: each chunk from
+   * here is uploaded instead of transcribed (lib/handoff.js), so nothing is
+   * decoded twice. Otherwise - the live run gave up, a retry, a recording
+   * picked up from this device - the audio is read again from where
+   * transcription got to. `job` carries on with a job already made.
+   */
+  const handOver = useCallback(
+    async (recording, { live = null, route: given = null, job = null, progress: from = null, slides = deck } = {}) => {
+      const healthy = live && !live.error;
+      // The recording remembers its slides, so finishing it later uses the same ones.
+      if (slides) recording.keep?.update({ deckHash: slides.hash });
+      const state = {
+        progress: from || live?.progress || recording.progress || freshProgress(chunkSecondsForConnection()),
+      };
+      const current = () => (healthy ? live.progress : state.progress);
+      const route =
+        given ||
+        serverRoute({
+          job,
+          request: jobRequest(recording, current, slides),
+          base: () => current().done,
+          recordingId: recording.id || null,
+          chunkSeconds: state.progress.chunkSeconds,
+          onUpload: (sent) => setProgress((previous) => ({ done: sent, total: Math.max(previous.total, sent) })),
+        });
 
       setPipelineError('');
-      setStage('transcribing');
-      // Chunks arrive lazily, so the real total is only known at the end. The
-      // recorded length estimates it to within one chunk.
-      setProgress({ done: start.done, total: estimateChunkCount(recording.seconds, start.chunkSeconds) });
+      setStage('uploading');
+      // Lazily cut chunks, so the total is an estimate from the recorded length.
+      setProgress({
+        done: route.sent,
+        total: Math.max(1, estimateChunkCount(recording.seconds, state.progress.chunkSeconds) - state.progress.done + route.sent),
+      });
 
-      const controller = new AbortController();
+      const controller = healthy ? live.controller : new AbortController();
       abortRef.current = controller;
       try {
-        const progress = await transcribeSegments(segments, {
-          language,
-          progress: start,
-          signal: controller.signal,
-          onChunk: (text, chunkProgress) => {
-            recording.keep?.chunk(text, chunkProgress);
-            onChunk(text, chunkProgress);
-          },
-        });
-        finishRecording(recording, progress);
+        if (healthy) {
+          live.route = route;
+          live.queue.close();
+          await live.promise;
+          state.progress = live.progress;
+          if (live.error) throw live.error;
+        } else {
+          state.progress = await transcribeSegments(recording.segments || [], {
+            language,
+            progress: state.progress,
+            signal: controller.signal,
+            retries: 2,
+            transcribe: route.transcribe,
+            onChunk: (_text, chunkProgress) => {
+              state.progress = chunkProgress;
+            },
+          });
+        }
+
+        if (!route.job && !transcriptRef.current.trim()) {
+          recording.keep?.close().then(refreshStored);
+          setPendingRecording({ ...recording, progress: state.progress });
+          setPipelineError('No speech was detected in that recording.');
+          return;
+        }
+        if (state.progress.detected) onDetectedLanguage?.(state.progress.detected);
+        const handed = await route.finish();
+        recording.keep?.update({ jobId: handed.id });
+        recording.keep?.close().then(refreshStored);
+        // The audio stays on the device until the next recording, so it can
+        // still be saved or done again.
+        setPendingRecording({ ...recording, complete: true, jobId: handed.id });
+        onHandedOver?.(handed);
       } catch (err) {
-        failRecording(recording, err, start);
+        failHandOver(recording, err, route, err?.progress || state.progress);
       } finally {
         abortRef.current = null;
         setStage('idle');
+        setLiveStalled(false);
       }
     },
-    [failRecording, finishRecording, language, onChunk],
+    [deck, failHandOver, jobRequest, language, onDetectedLanguage, onHandedOver, refreshStored],
   );
+
+  // Slides attached while recording belong to that recording too.
+  useEffect(() => {
+    if (deck && keepRef.current) keepRef.current.update({ deckHash: deck.hash });
+  }, [deck]);
+
+  // A reload in the middle of a hand-over: send the rest from the copy kept on
+  // this device. Left alone, the server makes do with what arrived after a
+  // while, and the note says a stretch is missing.
+  const resumedRef = useRef(false);
+  useEffect(() => {
+    if (resumedRef.current) return;
+    resumedRef.current = true;
+    const saved = handoffStore.get();
+    if (!saved?.jobId) return;
+    (async () => {
+      let job;
+      try {
+        job = await getNoteJob(saved.jobId);
+      } catch (err) {
+        if (err?.response?.status === 404) handoffStore.clear();
+        return;
+      }
+      if (job.status !== 'receiving') {
+        handoffStore.clear();
+        return;
+      }
+      const loaded = saved.recordingId ? await loadRecording(saved.recordingId) : null;
+      if (!loaded) return;
+      const chunkSeconds = saved.chunkSeconds || loaded.meta.progress?.chunkSeconds || chunkSecondsForConnection();
+      const progress = {
+        ...freshProgress(chunkSeconds),
+        ...(loaded.meta.progress || {}),
+        chunkSeconds,
+        done: saved.base + job.audio.received,
+      };
+      toast('Sending the rest of your last recording to the server…');
+      await handOver({ ...loaded, keep: keepRecording({ meta: loaded.meta }) }, { job, progress });
+    })();
+  }, [handOver]);
+
+  // A hand-over that lost the connection goes again once it is back.
+  useEffect(() => {
+    if (!pendingRecording?.retryOnline || busy) return undefined;
+    const retry = () =>
+      handOver(pendingRecording, { route: pendingRecording.route, progress: pendingRecording.progress });
+    window.addEventListener('online', retry, { once: true });
+    return () => window.removeEventListener('online', retry);
+  }, [busy, handOver, pendingRecording]);
 
   /**
    * Start transcribing while the recording is still going.
@@ -319,6 +420,8 @@ export const Recorder = ({
       base: transcriptRef.current,
       progress: freshProgress(chunkSecondsForConnection()),
       error: null,
+      // Set at Stop: from then on chunks go up to the server job instead.
+      route: null,
     };
     live.promise = transcribeSegments(live.queue, {
       language,
@@ -327,8 +430,12 @@ export const Recorder = ({
       // The lecture has time to spare; a dropped connection should not hand
       // the rest of it back to the end.
       retries: 2,
+      transcribe: (args) => (live.route ? live.route.transcribe(args) : transcribeChunk(args)),
       onChunk: (text, progress) => {
         live.progress = progress;
+        // An uploaded chunk has no text yet, and the recording kept here
+        // should still say where transcription itself got to.
+        if (live.route?.sent) return;
         keep?.chunk(text, progress);
         onChunk(text, progress);
       },
@@ -339,33 +446,6 @@ export const Recorder = ({
     });
     liveRef.current = live;
   }, [language, onChunk]);
-
-  /** After stop: let the live run do the last stretch, or pick up where it failed. */
-  const finishLive = useCallback(
-    async (recording, live) => {
-      setStage('transcribing');
-      setProgress({
-        done: live.progress.done,
-        total: Math.max(live.progress.done, estimateChunkCount(recording.seconds, live.progress.chunkSeconds)),
-      });
-      abortRef.current = live.controller;
-      live.queue.close();
-      await live.promise;
-      abortRef.current = null;
-      setStage('idle');
-      setLiveStalled(false);
-
-      if (!live.error) {
-        finishRecording(recording, live.progress);
-      } else if (isCancel(live.error) || live.error instanceof AudioDecodeError) {
-        failRecording(recording, live.error, live.progress);
-      } else {
-        // It already retried during the lecture, but that was minutes ago.
-        await runTranscription({ ...recording, progress: live.progress });
-      }
-    },
-    [failRecording, finishRecording, runTranscription],
-  );
 
   const handleStart = useCallback(async () => {
     setPipelineError('');
@@ -384,6 +464,7 @@ export const Recorder = ({
         }),
     });
     keepRef.current = keep;
+    if (deck) keep.update({ deckHash: deck.hash });
     // Ready before the recorder starts, so no segment can arrive to nobody.
     startLive(keep);
     const started = await recorder.start();
@@ -397,7 +478,7 @@ export const Recorder = ({
       keep.close().then(() => deleteRecording(keep.id));
     }
     refreshStored();
-  }, [language, localeFor, owner, recorder, refreshStored, speech, startLive]);
+  }, [deck, language, localeFor, owner, recorder, refreshStored, speech, startLive]);
 
   const handleStop = useCallback(async () => {
     // The button stays live until the recorder has finished closing, and a
@@ -424,12 +505,13 @@ export const Recorder = ({
       keep?.flush();
       const recording = { ...stopped, id: keep?.id, keep };
       setPendingRecording(recording);
-      if (live) await finishLive(recording, live);
-      else await runTranscription(recording);
+      // A live run that gave up during the lecture is not reused: the rest is
+      // read again from where it stopped.
+      await handOver(recording, { live });
     } finally {
       stoppingRef.current = false;
     }
-  }, [finishLive, recorder, runTranscription, speech]);
+  }, [handOver, recorder, speech]);
 
   const handleDiscard = useCallback(async () => {
     setConfirmDiscard(false);
@@ -567,8 +649,9 @@ export const Recorder = ({
   );
 
   /**
-   * Transcribe the rest of a kept recording - after a reload, a crash or a
-   * discard - from the chunk it got to. What was already done is not sent again.
+   * Finish a kept recording - after a reload, a crash or a discard - on the
+   * server, from the chunk transcription got to. What was already done is
+   * not sent again.
    */
   const continueStored = useCallback(
     async (meta) => {
@@ -580,9 +663,24 @@ export const Recorder = ({
       keep.update({ discarded: false });
       const recording = { ...loaded, keep, progress: meta.progress || undefined };
       setPendingRecording(recording);
-      await runTranscription(recording);
+      // Its own slides, brought back from this device, rather than whatever
+      // happens to be attached now.
+      let slides = deck;
+      if (meta.deckHash && meta.deckHash !== deck?.hash) {
+        const file = await loadDeckFile(meta.deckHash);
+        if (file) {
+          try {
+            slides = await openDeck(file);
+            deck?.close?.();
+            onDeck?.(slides);
+          } catch (err) {
+            /* unreadable now: the notes are made without it */
+          }
+        }
+      }
+      await handOver(recording, { slides });
     },
-    [readStored, restoreText, runTranscription],
+    [deck, handOver, onDeck, readStored, restoreText],
   );
 
   const deleteStored = useCallback(
@@ -753,8 +851,11 @@ export const Recorder = ({
                 >
                   <span className="text-sm text-zinc-300">
                     {progress.total > 1
-                      ? `Transcribing part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
-                      : 'Transcribing…'}
+                      ? `Sending the rest of the recording to the server… ${Math.min(progress.done + 1, progress.total)} of ${progress.total}`
+                      : 'Sending the rest of the recording to the server…'}
+                  </span>
+                  <span className="text-[11px] text-zinc-400">
+                    Keep this tab open until it is sent. After that you can close it.
                   </span>
                   {progress.total > 1 && (
                     <div className="w-48 h-1 rounded-full bg-white/5 overflow-hidden">
@@ -836,12 +937,15 @@ export const Recorder = ({
             {pendingRecording && !pendingRecording.complete && (
               <div className="flex flex-wrap gap-2 pl-6">
                 <button
-                  onClick={() => runTranscription(pendingRecording)}
+                  onClick={() =>
+                    handOver(pendingRecording, { route: pendingRecording.route, progress: pendingRecording.progress })
+                  }
+                  disabled={busy}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-white/5 hover:bg-white/10 text-zinc-200 border border-white/10 transition-colors duration-200"
                   data-testid="retry-transcription-btn"
                 >
                   <RotateCcw size={12} />
-                  Retry transcription
+                  Retry
                 </button>
                 <button
                   onClick={() => handleDownloadAudio(pendingRecording)}
@@ -901,7 +1005,8 @@ export const Recorder = ({
               data-testid="transcript-editor"
             />
             <p className="text-[11px] text-zinc-400">
-              Fix anything that came out wrong before generating your notes.
+              Notes are written from it by themselves. Fix anything that came out wrong, then Generate
+              notes again to redo them.
             </p>
           </motion.div>
         )}

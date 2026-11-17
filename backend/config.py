@@ -140,6 +140,30 @@ class Settings:
     SUMMARY_JOB_TTL: int = _int("SUMMARY_JOB_TTL", 30 * 60)
     MAX_SUMMARY_JOBS: int = _int("MAX_SUMMARY_JOBS", 2)
 
+    # ── Recordings finished on the server (pipeline.py) ───────────────────
+    # Stop hands a recording to the server: the text so far, and the audio the
+    # app had not transcribed yet. The server does the rest and saves the note,
+    # so the tab can close.
+    NOTE_JOB_MAX_ACTIVE: int = _int("NOTE_JOB_MAX_ACTIVE", 3)
+    # Normally one or two chunks: live transcription has done the rest by Stop.
+    # These caps are for a lecture whose live run stalled from the start.
+    NOTE_JOB_MAX_CHUNKS: int = _int("NOTE_JOB_MAX_CHUNKS", 90)
+    # Each chunk is stored as one MongoDB document, which cannot pass 16 MB.
+    NOTE_JOB_MAX_CHUNK_BYTES: int = _int("NOTE_JOB_MAX_CHUNK_BYTES", 15 * 1_048_576)
+    NOTE_JOB_MAX_AUDIO_BYTES: int = _int("NOTE_JOB_MAX_AUDIO_BYTES", 160 * 1_048_576)
+    # An upload that stops this long is taken as finished with what arrived.
+    NOTE_JOB_RECEIVE_TIMEOUT: int = _int("NOTE_JOB_RECEIVE_TIMEOUT", 30 * 60)
+    # How long a chunk every provider refuses keeps being retried, counted from
+    # the handover. Past it, a chunk that fails is left out and marked missing.
+    NOTE_JOB_AUDIO_RETRY_FOR: int = _int("NOTE_JOB_AUDIO_RETRY_FOR", 3 * 3600)
+    # Finished jobs are kept this long, so the app can say what became of them.
+    NOTE_JOB_KEEP_DAYS: int = _int("NOTE_JOB_KEEP_DAYS", 7)
+    PIPELINE_CONCURRENCY: int = _int("PIPELINE_CONCURRENCY", 2)
+    PIPELINE_SWEEP_SECONDS: int = _int("PIPELINE_SWEEP_SECONDS", 300)
+    # Pinged while jobs are unfinished, so a free Render instance does not
+    # sleep under them. Render sets RENDER_EXTERNAL_URL itself.
+    KEEPALIVE_URL: str = os.environ.get("KEEPALIVE_URL") or os.environ.get("RENDER_EXTERNAL_URL", "")
+
     APP_VERSION: str = os.environ.get("APP_VERSION", "2.0.0")
 
     # Notes saved before accounts existed have no owner. Set this to an email

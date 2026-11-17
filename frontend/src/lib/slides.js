@@ -1,9 +1,9 @@
 /**
  * Lecture slides (PDF), read in the browser.
  *
- * The file never leaves the device: its text goes along with the transcript
- * when notes are made, and later only pictures of the pages the notes cite are
- * uploaded. A 30 MB deck through the backend would cost metered bandwidth for
+ * The file never leaves the device (it is kept there, lib/deckStore): its text
+ * goes along with the transcript when notes are made, and later only pictures
+ * of the pages the notes cite are uploaded. A 30 MB deck through the backend would cost metered bandwidth for
  * text that is a few kilobytes once extracted.
  *
  * pdf.js is loaded on first use; most sessions never need it.
@@ -93,6 +93,8 @@ export async function openDeck(file, { onProgress } = {}) {
 
   return {
     name: file.name,
+    // Kept on the device (lib/deckStore) so the slides outlast the tab.
+    file,
     pageCount: doc.numPages,
     hash,
     pages,

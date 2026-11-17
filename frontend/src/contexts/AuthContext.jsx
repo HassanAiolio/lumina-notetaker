@@ -16,6 +16,7 @@ import {
   tokenStore,
 } from '../services/api';
 import { clearRecordings } from '../lib/recordingStore';
+import { clearDecks } from '../lib/deckStore';
 
 const GSI_SRC = 'https://accounts.google.com/gsi/client';
 
@@ -71,6 +72,7 @@ export const AuthProvider = ({ children }) => {
     // The same goes for the recordings kept on this device. The menu warns
     // before getting here when there is anything to lose.
     clearRecordings();
+    clearDecks();
     setUser(null);
     try {
       window.google?.accounts?.id?.disableAutoSelect();
